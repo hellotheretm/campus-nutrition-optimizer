@@ -7,7 +7,6 @@ import { getSessionUser } from "@/lib/auth";
 import { getUniversity } from "@/lib/data/catalog";
 import { addPlanItemsToDiary, getPlan, savePlan } from "@/lib/data/user";
 import { todayIn } from "@/lib/dates";
-import { goalsAllowed } from "@/lib/nutrition/references";
 import { generatePlan, PlanRequestError } from "@/lib/optimizer";
 import { loadCandidates } from "@/lib/optimizer/candidates";
 import { evaluatePlan, modelStatsSchema, planSelectionSchema } from "@/lib/optimizer/evaluate";
@@ -35,15 +34,9 @@ async function allowed(bucket: string, guestLimit: number, userLimit: number, wi
   return { user, ok: r.ok };
 }
 
-/**
- * Validates a request and removes anything the person's age group doesn't
- * allow: calorie and protein goals are only used for adults who chose an age
- * group (never for people under 19, never by default).
- */
+/** Validates a request. Calorie and macro targets are only ever the ones the person entered. */
 function sanitize(input: unknown): PlanRequest {
-  const req = planRequestSchema.parse(input);
-  if (!goalsAllowed(req.reference.ageGroup)) return { ...req, energy: null, proteinMin: null, macroTargets: null };
-  return req;
+  return planRequestSchema.parse(input);
 }
 
 export async function generatePlanAction(input: unknown): Promise<ActionResult<{ request: PlanRequest; result: PlanResult }>> {

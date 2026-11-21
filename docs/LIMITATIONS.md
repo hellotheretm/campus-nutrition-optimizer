@@ -47,8 +47,9 @@ This app is honest about what it cannot know. These limits also appear in the in
   prescriptions. It does not diagnose deficiencies, treat conditions, or account for supplements, medications,
   pregnancy, athletic training or medical diets.
 - Uncertain estimates are counted conservatively, so a plan may contain more of a nutrient than its coverage shows.
-- No calorie targets are used for people under 19 or anyone who hasn't given an adult age range, and the app never
-  creates a calorie deficit on its own.
+- Calorie and macro targets are only ever the numbers a person enters; the app never suggests targets or creates a
+  calorie deficit on its own. Anyone can set them, including people under 19, who see a note that teens need enough
+  energy to grow.
 
 ## Accounts and privacy
 

@@ -6,7 +6,7 @@ import type { MenuDayStatus } from "@/db/schema";
 import type { NutrientId } from "@/lib/nutrition/nutrients";
 import type { AgeGroup, ReferenceSex, ReferenceStandard } from "@/lib/nutrition/references";
 import { computeCoverage, energyTotal, planLines, ulWarnings } from "@/lib/optimizer/coverage";
-import type { CoverageRow, DietFilterInput, GoalMode, MenuChoice, PlanItem, PlanMeal, PlanPeriod, PlanRequest, PlanResult, StrategyKey } from "@/lib/optimizer/types";
+import type { CoverageRow, DietFilterInput, MacroTargetsInput, MenuChoice, PlanItem, PlanMeal, PlanPeriod, PlanRequest, PlanResult, StrategyKey } from "@/lib/optimizer/types";
 import { dietaryPreferencesSchema, PLAN_PERIODS, STRATEGY_KEYS } from "@/lib/optimizer/types";
 import { z } from "zod";
 
@@ -30,9 +30,8 @@ export interface OptimizerUniversity {
 export interface OptimizerDefaults {
   reference: { standard: ReferenceStandard; ageGroup: AgeGroup; sex: ReferenceSex };
   preferences: DietFilterInput;
-  energyMin: number | null;
-  energyMax: number | null;
-  proteinMin: number | null;
+  /** Daily targets saved in Settings (all blank when none). */
+  targets: MacroTargetsInput;
 }
 
 export interface SavedPlanView {
@@ -42,26 +41,14 @@ export interface SavedPlanView {
   result: PlanResult;
 }
 
-/** Strict daily calorie and macro targets (daily mode, adults). Calories are always 4P + 9F + 4C. */
-export interface StrictTargets {
-  enabled: boolean;
-  protein: number | null;
-  fat: number | null;
-  carbohydrate: number | null;
-  tolerancePct: 3 | 5 | 10;
-}
-
-export const DEFAULT_STRICT: StrictTargets = { enabled: false, protein: null, fat: null, carbohydrate: null, tolerancePct: 5 };
+export const EMPTY_TARGETS: MacroTargetsInput = { energy: null, protein: null, fat: null, carbohydrate: null, tolerancePct: 5 };
 
 export interface Inputs {
   meals: Record<PlanPeriod, { enabled: boolean; locationIds: string[] }>;
-  goalMode: GoalMode;
   strategy: StrategyKey;
   reference: OptimizerDefaults["reference"];
-  energyMin: number | null;
-  energyMax: number | null;
-  proteinMin: number | null;
-  strict: StrictTargets;
+  /** Optional daily calorie and macro targets. */
+  targets: MacroTargetsInput;
   preferences: DietFilterInput;
   maxItemsPerMeal: number;
   maxServingsPerItem: number;
@@ -101,13 +88,9 @@ export function inputsFromRequest(req: PlanRequest, availability: PeriodAvailabi
   void availability;
   return {
     meals,
-    goalMode: req.goalMode,
     strategy: req.strategy,
     reference: req.reference,
-    energyMin: req.energy?.min ?? null,
-    energyMax: req.energy?.max ?? null,
-    proteinMin: req.proteinMin,
-    strict: req.macroTargets ? { enabled: true, ...req.macroTargets } : DEFAULT_STRICT,
+    targets: req.macroTargets ? { ...EMPTY_TARGETS, ...req.macroTargets } : EMPTY_TARGETS,
     preferences: req.preferences,
     maxItemsPerMeal: req.maxItemsPerMeal,
     maxServingsPerItem: req.maxServingsPerItem,
@@ -162,24 +145,21 @@ export function itemFromChoice(c: MenuChoice, servings: number, maxServings: num
 
 export const periodIndex = (p: string) => PLAN_PERIODS.indexOf(p as PlanPeriod);
 
-const STORAGE_KEY = "cno:optimizer:settings:v1";
+// v2: goal modes and the separate calorie range were replaced by one set of daily targets.
+const STORAGE_KEY = "cno:optimizer:settings:v2";
 const storedSchema = z
   .object({
-    goalMode: z.enum(["balanced", "daily", "per_meal", "mixed"]),
     strategy: z.enum(STRATEGY_KEYS as [StrategyKey, ...StrategyKey[]]),
     reference: z.object({
       standard: z.enum(["fda_dv", "dri"]),
       ageGroup: z.enum(["under_19", "19_30", "31_50", "51_70", "71_plus", "unspecified"]),
       sex: z.enum(["female", "male", "unspecified"]),
     }),
-    energyMin: z.number().min(600).max(6000).nullable(),
-    energyMax: z.number().min(600).max(6000).nullable(),
-    proteinMin: z.number().min(10).max(300).nullable(),
-    strict: z.object({
-      enabled: z.boolean(),
-      protein: z.number().min(0).max(400).nullable(),
-      fat: z.number().min(0).max(300).nullable(),
-      carbohydrate: z.number().min(0).max(900).nullable(),
+    targets: z.object({
+      energy: z.number().min(0).max(10000).nullable(),
+      protein: z.number().min(0).max(1000).nullable(),
+      fat: z.number().min(0).max(1000).nullable(),
+      carbohydrate: z.number().min(0).max(2000).nullable(),
       tolerancePct: z.union([z.literal(3), z.literal(5), z.literal(10)]),
     }),
     preferences: dietaryPreferencesSchema,
@@ -246,13 +226,9 @@ export function applyStored(prev: Inputs, s: Stored): Inputs {
 export function initialInputs(defaults: OptimizerDefaults, availability: PeriodAvailability[]): Inputs {
   return {
     meals: defaultMeals(availability),
-    goalMode: "balanced",
     strategy: "balanced",
     reference: defaults.reference,
-    energyMin: defaults.energyMin,
-    energyMax: defaults.energyMax,
-    proteinMin: defaults.proteinMin,
-    strict: DEFAULT_STRICT,
+    targets: defaults.targets,
     preferences: defaults.preferences,
     maxItemsPerMeal: 4,
     maxServingsPerItem: 2,

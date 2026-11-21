@@ -57,7 +57,7 @@ export function PlanTotals({
   const e = live.energy;
   const strict = result.macroTargets?.length ? result.macroTargets : null;
   const strictTolerance = strict ? Math.round(((strict[0].max - strict[0].target) / strict[0].target) * 100) : 0;
-  /** Live comparison with a strict target (recomputed as the plan is edited). */
+  /** Live comparison with a target (recomputed as the plan is edited). */
   const strictTarget = (id: MacroId, value: number | null): TileTarget | null => {
     const row = strict?.find((r) => r.id === id);
     if (!row) return null;
@@ -110,7 +110,7 @@ export function PlanTotals({
       </dl>
       {strict && (
         <p className="-mt-3 text-xs text-muted-foreground">
-          Strict targets, each within ±{strictTolerance}%. Calories follow 4/9/4 math from your macros; labels round, so small gaps are normal.
+          Your targets, each within ±{strictTolerance}%. Calories and macros follow 4/9/4 math; labels round, so small gaps are normal.
         </p>
       )}
       {!strict && showCalories && result.energy.shown && (result.energy.min || result.energy.max) && (

@@ -64,8 +64,8 @@ interface DiaryViewProps {
   reference: ReferenceProfile;
   showCalories: boolean;
   showPercentages: boolean;
-  calorieGoal: { min: number | null; max: number | null } | null;
-  proteinGoal: number | null;
+  /** Daily calorie and macro targets from Settings (only those set). */
+  targets: Partial<Record<"energy" | "protein" | "fat" | "carbohydrate", number>>;
   university: { id: string; name: string; isDemo: boolean } | null;
 }
 
@@ -496,8 +496,7 @@ function DaySummary({
   reference,
   showCalories,
   showPercentages,
-  calorieGoal,
-  proteinGoal,
+  targets,
   includePlanned,
   onIncludePlanned,
 }: DiaryViewProps & { includePlanned: boolean; onIncludePlanned: (v: boolean) => void }) {
@@ -549,15 +548,9 @@ function DaySummary({
               {eaten.unknown + plannedKcal.unknown} item(s) have no calorie data and aren’t counted.
             </p>
           )}
-          {calorieGoal && (
+          {targets.energy !== undefined && (
             <p className="col-span-2 text-xs text-muted-foreground">
-              Your calorie range:{" "}
-              {calorieGoal.min && calorieGoal.max
-                ? `${calorieGoal.min.toLocaleString()}–${calorieGoal.max.toLocaleString()} kcal`
-                : calorieGoal.min
-                  ? `at least ${calorieGoal.min.toLocaleString()} kcal`
-                  : `up to ${calorieGoal.max!.toLocaleString()} kcal`}{" "}
-              (a reference you set, not a rule).
+              Your calorie target: {Math.round(targets.energy).toLocaleString("en-US")} kcal (a number you set in Settings).
             </p>
           )}
         </div>
@@ -574,7 +567,7 @@ function DaySummary({
           <div key={id} className="rounded-2xl bg-muted/60 p-2">
             <dt className="text-xs text-muted-foreground">{label}</dt>
             <dd className="text-sm font-semibold tabular-nums">{macro(id)}</dd>
-            {id === "protein" && proteinGoal && <dd className="text-[11px] text-muted-foreground">of {proteinGoal} g</dd>}
+            {targets[id] !== undefined && <dd className="text-[11px] text-muted-foreground">of {Math.round(targets[id]!)} g</dd>}
           </div>
         ))}
       </dl>

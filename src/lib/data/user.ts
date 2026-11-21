@@ -25,11 +25,11 @@ import type { NutrientEstimate, NutrientEstimates } from "@/lib/nutrition/estima
 import { nutrientsForUsdaFood } from "@/lib/nutrition/estimator";
 import { perServingNutrients } from "@/lib/nutrition/food-nutrients";
 import { isNutrientId, type NutrientId } from "@/lib/nutrition/nutrients";
-import { goalsAllowed, type AgeGroup, type ReferenceSex, type ReferenceStandard } from "@/lib/nutrition/references";
+import type { AgeGroup, ReferenceSex, ReferenceStandard } from "@/lib/nutrition/references";
 import { compactEstimates, scaleEstimates } from "@/lib/nutrition/totals";
 import { getUsdaFood } from "@/lib/nutrition/usda-index";
 import { servingLabel } from "@/lib/nutrition/units";
-import type { PlanRequest, PlanResult } from "@/lib/optimizer/types";
+import { resolveMacroTargets, type MacroTargetsInput, type PlanRequest, type PlanResult } from "@/lib/optimizer/types";
 
 /* ------------------------------------------------------------------ */
 /* Profile                                                            */
@@ -44,9 +44,11 @@ export interface ProfileData {
   showCalories: boolean;
   showPercentages: boolean;
   dietary: DietaryPreferences;
-  calorieGoal: { min: number | null; max: number | null };
-  proteinGoal: number | null;
+  /** Daily calorie and macro targets; every field may be blank. */
+  targets: MacroTargetsInput;
 }
+
+export const NO_TARGETS: MacroTargetsInput = { energy: null, protein: null, fat: null, carbohydrate: null, tolerancePct: 5 };
 
 export const DEFAULT_DIETARY: DietaryPreferences = {
   pattern: "none",
@@ -68,8 +70,7 @@ export const DEFAULT_PROFILE: ProfileData = {
   showCalories: true,
   showPercentages: true,
   dietary: DEFAULT_DIETARY,
-  calorieGoal: { min: null, max: null },
-  proteinGoal: null,
+  targets: NO_TARGETS,
 };
 
 const termList = z.array(z.string().trim().min(1).max(60)).max(30);
@@ -92,19 +93,28 @@ export const profileSchema = z.object({
     dislikes: termList,
     preferred: termList,
   }),
-  calorieGoal: z.object({
-    min: z.number().int().min(800).max(6000).nullable(),
-    max: z.number().int().min(800).max(6000).nullable(),
+  targets: z.object({
+    energy: z.number().nullable(),
+    protein: z.number().nullable(),
+    fat: z.number().nullable(),
+    carbohydrate: z.number().nullable(),
+    tolerancePct: z.union([z.literal(3), z.literal(5), z.literal(10)]),
   }),
-  proteinGoal: z.number().int().min(10).max(300).nullable(),
 });
+
+/** Targets from the stored goals, converting the older calorie-range format. */
+function targetsFrom(goals: GoalsJson): MacroTargetsInput {
+  if (goals.targets) return { ...NO_TARGETS, ...goals.targets };
+  const { min, max } = goals.calorieGoal ?? { min: null, max: null };
+  const energy = min && max ? Math.round((min + max) / 2) : (min ?? max ?? null);
+  return { ...NO_TARGETS, energy, protein: goals.proteinGoal ?? null };
+}
 
 type GoalsJson = ProfileGoals;
 
 function toProfile(row: typeof profiles.$inferSelect | undefined): ProfileData {
   if (!row) return DEFAULT_PROFILE;
   const goals = (row.goals ?? {}) as GoalsJson;
-  const noGoals = !goalsAllowed(row.ageGroup as AgeGroup);
   return {
     displayName: row.displayName,
     universityId: row.universityId,
@@ -114,9 +124,7 @@ function toProfile(row: typeof profiles.$inferSelect | undefined): ProfileData {
     showCalories: row.showCalories,
     showPercentages: row.showPercentages,
     dietary: { ...DEFAULT_DIETARY, ...(row.dietary ?? {}) },
-    // Calorie and protein goals apply only to people who said they are 19 or older.
-    calorieGoal: noGoals ? { min: null, max: null } : (goals.calorieGoal ?? { min: null, max: null }),
-    proteinGoal: noGoals ? null : (goals.proteinGoal ?? null),
+    targets: targetsFrom(goals),
   };
 }
 
@@ -129,11 +137,9 @@ export async function getProfile(userId: string): Promise<ProfileData> {
 
 export async function saveProfile(userId: string, input: unknown): Promise<ProfileData> {
   const data = profileSchema.parse(input);
-  const noGoals = !goalsAllowed(data.ageGroup);
-  if (data.calorieGoal.min && data.calorieGoal.max && data.calorieGoal.min > data.calorieGoal.max) {
-    throw new Error("The lower calorie bound must not be above the upper bound.");
-  }
-  const goals: GoalsJson = noGoals ? {} : { calorieGoal: data.calorieGoal, proteinGoal: data.proteinGoal };
+  const check = resolveMacroTargets(data.targets);
+  if (check.error) throw new Error(check.error);
+  const goals: GoalsJson = { targets: data.targets };
   const values = {
     userId,
     displayName: data.displayName || null,

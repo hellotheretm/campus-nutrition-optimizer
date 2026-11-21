@@ -11,11 +11,12 @@ mixed-integer linear program (MILP) solved with HiGHS (WebAssembly) on the serve
 - Dietary pattern (vegetarian, vegan, pescatarian), allergens to avoid, "avoid gluten/dairy/nuts", excluded ingredients,
   dislikes and preferred foods.
 - Reference values: FDA Daily Values (default) or Dietary Reference Intakes by optional age range and sex.
-- Goal mode: **balanced** (whole day, protein spread across meals), **daily** (whole-day goals), **per meal** (each
-  meal gets its share), or **mixed** (day-level micronutrients, per-meal protein).
+- There is one goal: cover as many of the day's vitamin, mineral, protein and fiber references as the menus allow, and
+  hit any calorie and macro targets that were set.
 - Strategy: balanced, protein-forward, plant-forward, lower sodium, or fewer items.
-- Optional calorie range and protein minimum, **adults only**. They are removed on the server for anyone under 19 or
-  with no age given, and calorie targets are never used in balanced mode.
+- Optional **daily targets** for calories, protein, fat and carbs, available to everyone. Any may be left blank; with
+  three of the four set the fourth is calculated (calories = 4P + 9F + 4C), and four set must add up exactly. A
+  tolerance of ±3, 5 or 10% applies to each. Signed-in users can save default targets in Settings.
 - Locks, exclusions and "don't repeat" constraints coming from the editing tools.
 
 ## Candidates
@@ -41,8 +42,8 @@ Per meal: between 1 and the maximum number of items, and a cap on total servings
 
 ### Objective (minimized)
 
-- **Goals with diminishing returns.** For each goal nutrient, coverage of the reference is built from the
-  *conservative* value of each item (the estimate moved part-way toward the low end of its range by confidence:
+- **Goals with diminishing returns** (day level; protein is also nudged to spread across meals). For each goal
+  nutrient, coverage of the reference is built from the *conservative* value of each item (the estimate moved part-way toward the low end of its range by confidence:
   0%, 15% or 35% for high, medium and low). Shortfall is penalized piecewise: the first 25% short costs 1×, the next 25%
   costs 1.8×, the rest 3×. Over-delivering earns nothing extra, so one nutrient never crowds out the others.
 - **Soft limits** for sodium, saturated fat and added sugars, using the *pessimistic* value (moved toward the high end).
@@ -51,15 +52,13 @@ Per meal: between 1 and the maximum number of items, and a cap on total servings
   choline, calcium, copper, iron, manganese, phosphorus, selenium, zinc), using the high end of every range. A slack
   variable with a very large penalty keeps the model solvable but makes exceeding a UL a last resort, and any remaining
   risk is reported as a warning.
-- **Calorie range** (adults who set one): staying within 3% of a bound is cheap; beyond that it is expensive.
-- **Macronutrient distribution** (adults): small penalties for protein, fat and carbohydrate energy outside the AMDR.
-- **Strict calorie and macro targets** (daily mode, adults who chose an age group): the user enters protein, fat and
-  carbohydrate grams (or a calorie total, which sets carbs), and calories are always `4P + 9F + 4C`, so the four
-  targets can't disagree. For each of the four, `Σ value·n + under − over = target`; `under` and `over` cost
+- **Macronutrient distribution** (no targets set): small penalties for protein, fat and carbohydrate energy outside the AMDR.
+- **Calorie and macro targets** (when set, for anyone): only the targets that were set are modeled, and they always agree
+  with 4/9/4 math (see Inputs). For each target, `Σ value·n + under − over = target`; `under` and `over` cost
   `40/target` each (a pull toward exact), and each must stay within ±tolerance (3, 5 or 10%). The band is hard: its
   slack costs `5000/target` and exists only so an impossible request is explained ("the closest plan these menus
-  allow has 2,610 kcal, outside your 2,300 ±5% target"). Items with unknown calories or macros can't be counted, so
-  they are not chosen unless locked. Strict targets replace the calorie range and the AMDR penalties. Label rounding
+  allow has 2,610 kcal, outside your 2,300 ±5% target"). Items with an unknown value for a targeted macro can't be
+  counted, so they are not chosen unless locked. Targets replace the AMDR penalties. Label rounding
   means a food's calories rarely equal its 4/9/4 math exactly, which is why a tolerance exists at all.
 - **Practical portions:** a small cost per item and per serving, a larger one for second servings of the same dish,
   a bonus for preferred foods, a small cost for low-confidence items, and a variety cost when the same dish appears in
@@ -99,7 +98,7 @@ rebuilds the plan from stored menu data (`evaluate.ts`), so nothing the browser 
 ## Output
 
 Meals with items (servings, why each was chosen, confidence, allergens and labels), coverage rows for every goal and
-limit with ranges and unknown counts, energy with its range (hidden for minors), warnings (including UL risk), a plain
+limit with ranges and unknown counts, energy with its range, each calorie and macro target with how close the plan came, warnings (including UL risk), a plain
 summary, assumptions, and solver statistics. Plans can be saved to History or added to the diary as planned or eaten.
 
 ## Performance

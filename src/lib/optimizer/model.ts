@@ -15,7 +15,8 @@
  *                                               sugar limits (first 25% over is cheaper)
  * + Σ_UL      10,000 · slack / UL               upper limits are hard; the slack only exists
  *                                               to explain infeasibility
- * + energy and macro-distribution deviations (adults, when requested)
+ * + calorie and macro target deviations (when set: a hard ±tolerance band plus a pull toward
+ *   exact), or, without targets, small penalties for macro energy outside the AMDR
  * + 0.3 per repeated dish across meals (variety)
  * + small per-item and per-serving costs, plus 0.2 per serving beyond the first of any
  *   item (practical portions), and preferred-food bonuses.
@@ -32,6 +33,7 @@ import { LpModel, solveModel } from "@/lib/solver/lp";
 import { computeCoverage, conservativeValue, energyTotal, explainItems, pessimisticValue, planLines, upperValue } from "./coverage";
 import { nutrientName, type MacroSpec, type Targets } from "./targets";
 import {
+  MACRO_IDS,
   STRATEGIES,
   type CoverageRow,
   type MacroId,
@@ -74,9 +76,7 @@ export interface MealCandidates {
 
 const MAX_CANDIDATES_PER_MEAL = 45;
 const UL_PENALTY = 10_000;
-/** Share of a calorie bound that can be exceeded cheaply (label rounding, serving variation). */
-const ENERGY_TOLERANCE = 0.03;
-/** Cost of missing a strict macro target by 100% inside its band (1% ≈ 0.4): pulls plans toward exact. */
+/** Cost of missing a calorie or macro target by 100% inside its band (1% ≈ 0.4): pulls plans toward exact. */
 const MACRO_EXACT_WEIGHT = 40;
 /** Cost per unit (relative to target) outside the band; only paid when no plan can stay inside it. */
 const MACRO_BAND_PENALTY = 5_000;
@@ -165,8 +165,8 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
 
   const model = new LpModel("min");
   const refs: VarRef[] = [];
-  // With strict macro targets, an item whose calories or macros are unknown can't be counted, so it isn't chosen.
-  const macroIds = ["energy", "protein", "fat", "carbohydrate"] as const;
+  // With calorie or macro targets, an item whose value for a targeted macro is unknown can't be counted, so it isn't chosen.
+  const macroIds = targets.macros ? MACRO_IDS.filter((id) => targets.macros!.targets[id] !== undefined) : [];
   const missingMacro = (c: Candidate) => macroIds.some((id) => c.nutrients[id]?.value === null || c.nutrients[id]?.value === undefined);
   let macroSkipped = 0;
   const mealHasVars: boolean[] = [];
@@ -321,32 +321,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     ulSlacks.push({ v: slack, id: u.id, amount: u.amount });
   }
 
-  // Energy goals (adults who asked for them). Soft, so a plan always exists,
-  // but going more than ENERGY_TOLERANCE outside the range is expensive.
-  for (const [ei, e] of targets.energy.entries()) {
-    const scoped = refs.filter((r) => inScope(r, e.scope));
-    const terms: [string, number][] = scoped
-      .map((r) => [r.n, (r.c.nutrients.energy?.value ?? 0) * r.c.step] as [string, number])
-      .filter(([, v]) => v > 0);
-    if (!terms.length) continue;
-    const deviation = (name: string, bound: number) => {
-      const near = model.addVar(`${name}_near`, { lb: 0, ub: bound * ENERGY_TOLERANCE });
-      const far = model.addVar(`${name}_far`, { lb: 0 });
-      model.addObjective(near, 3 / bound);
-      model.addObjective(far, 60 / bound);
-      return [near, far] as const;
-    };
-    if (e.min) {
-      const [near, far] = deviation(`elo_${ei}`, e.min);
-      model.addConstraint(`emin_${ei}`, [...terms, [near, 1], [far, 1]], ">=", e.min);
-    }
-    if (e.max) {
-      const [near, far] = deviation(`ehi_${ei}`, e.max);
-      model.addConstraint(`emax_${ei}`, [...terms, [near, -1], [far, -1]], "<=", e.max);
-    }
-  }
-
-  // Macronutrient distribution (AMDR), adults only, day level, in kcal.
+  // Macronutrient distribution (AMDR) when no calorie or macro targets are set: day level, in kcal.
   if (targets.amdr) {
     const amdr = targets.profile.amdr;
     const macro = (id: NutrientId, factor: number) =>
@@ -368,14 +343,14 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     }
   }
 
-  // Strict calorie and macro targets (daily mode, adults). Each total must stay within ±tolerance
+  // Calorie and macro targets (only those set). Each total must stay within ±tolerance
   // (hard; the band slack exists only to diagnose an impossible request), and inside the band
   // every gram or kcal away from the exact target still costs, so plans land as close as the menus allow.
   const macroSlacks: { v: string; id: MacroId; dir: "under" | "over" }[] = [];
   if (targets.macros) {
     const { targets: goal, tolerance } = targets.macros;
     for (const id of macroIds) {
-      const target = goal[id];
+      const target = goal[id]!;
       const terms = refs
         .map((r) => [r.n, (r.c.nutrients[id]?.value ?? 0) * r.c.step] as [string, number])
         .filter(([, v]) => v > 0);
@@ -392,7 +367,12 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
       model.addConstraint(`mboc_${id}`, [[over, 1], [bandOver, -1]], "<=", target * tolerance);
       macroSlacks.push({ v: bandUnder, id, dir: "under" }, { v: bandOver, id, dir: "over" });
     }
-    if (macroSkipped) warnings.push(`${macroSkipped} menu items without published or estimated calories and macros were left out, because they can't be counted toward strict targets.`);
+    if (macroSkipped) {
+      const one = macroSkipped === 1;
+      warnings.push(
+        `${macroSkipped} menu ${one ? "item" : "items"} without published or estimated values for your targets ${one ? "was" : "were"} left out, because ${one ? "it" : "they"} can't be counted toward them.`,
+      );
+    }
   }
 
   // Variety: the same dish in several meals costs a little.
@@ -513,7 +493,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     };
   }
 
-  // Strict-target diagnosis.
+  // Calorie and macro target diagnosis.
   const macroRows = targets.macros ? macroTargetRows(planMeals, targets.macros) : null;
   const missed = macroSlacks.filter((m) => (solved.values.get(m.v) ?? 0) > 1e-6);
   if (missed.length && macroRows && targets.macros) {
@@ -546,7 +526,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
   }
 
   const e = energyTotal(lines);
-  const energyTarget = targets.energy.find((x) => x.scope === "day");
+  const energyRow = macroRows?.find((r) => r.id === "energy");
   const signature = planSignature(planMeals);
 
   return {
@@ -554,16 +534,15 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     universityId: req.universityId,
     date: req.date,
     strategy,
-    goalMode: req.goalMode,
     referenceLabel: targets.profile.label,
     meals: planMeals,
     targets: targets.summary,
     coverage,
     energy: {
       ...e,
-      min: energyTarget?.min ?? macroRows?.[0].min ?? null,
-      max: energyTarget?.max ?? macroRows?.[0].max ?? null,
-      shown: !targets.profile.isMinor,
+      min: energyRow?.min ?? null,
+      max: energyRow?.max ?? null,
+      shown: true,
     },
     macroTargets: macroRows,
     summary,
@@ -601,7 +580,6 @@ function emptyResult(
     universityId: req.universityId,
     date: req.date,
     strategy: req.strategy,
-    goalMode: req.goalMode,
     referenceLabel: targets.profile.label,
     meals: meals.map((m) => ({
       period: m.period,
@@ -614,7 +592,7 @@ function emptyResult(
     })),
     targets: targets.summary,
     coverage: computeCoverage([], targets.summary),
-    energy: { value: null, low: null, high: null, min: null, max: null, shown: !targets.profile.isMinor },
+    energy: { value: null, low: null, high: null, min: null, max: null, shown: true },
     summary: [],
     warnings: targets.notes,
     infeasibility: { reasons: [...reasons, ...filterHints], suggestions },
@@ -632,11 +610,11 @@ function emptyResult(
   };
 }
 
-/** Planned totals against strict calorie and macro targets (energy first). */
+/** Planned totals against the calorie and macro targets that were set (energy first). */
 export function macroTargetRows(meals: PlanMeal[], spec: MacroSpec): MacroTargetRow[] {
   const items = meals.flatMap((m) => m.items);
-  return (["energy", "protein", "fat", "carbohydrate"] as const).map((id) => {
-    const target = spec.targets[id];
+  return MACRO_IDS.filter((id) => spec.targets[id] !== undefined).map((id) => {
+    const target = spec.targets[id]!;
     let value = 0;
     let known = 0;
     let unknownItems = 0;

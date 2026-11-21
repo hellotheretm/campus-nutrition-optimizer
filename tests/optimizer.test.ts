@@ -6,7 +6,7 @@ import { computeCoverage, planLines } from "@/lib/optimizer/coverage";
 import { checkFood, termMatches } from "@/lib/optimizer/filters";
 import { optimize, planSignature, type Candidate, type MealCandidates } from "@/lib/optimizer/model";
 import { buildTargets } from "@/lib/optimizer/targets";
-import { planRequestSchema, type PlanRequestInput } from "@/lib/optimizer/types";
+import { planRequestSchema, resolveMacroTargets, type PlanRequestInput } from "@/lib/optimizer/types";
 
 const prefs = (p: Partial<PlanRequestInput["preferences"]> = {}) => planRequestSchema.parse({ universityId: "u", date: "2026-11-20", meals: [{ period: "lunch" }], preferences: p }).preferences;
 
@@ -143,27 +143,12 @@ describe("meal optimizer", () => {
     expect(plan.infeasibility?.suggestions.length).toBeGreaterThan(0);
   });
 
-  it("never uses calorie targets for people under 19", async () => {
-    const { targets, plan } = await run(
-      { goalMode: "daily", energy: { min: 1200, max: 1400 }, reference: { standard: "dri", ageGroup: "under_19", sex: "female" } },
-      [meal("lunch", lunchMenu())],
-    );
-    expect(targets.energy).toEqual([]);
-    expect(targets.notes.join(" ")).toMatch(/not used for people under 19/);
-    expect(plan.energy.min).toBeNull();
-    expect(plan.energy.max).toBeNull();
-  });
-
-  it("applies an adult's calorie range only when they set one in a goal mode", async () => {
-    const adult = { standard: "fda_dv" as const, ageGroup: "19_30" as const, sex: "unspecified" as const };
-    const balanced = await run({ energy: { min: 600, max: 900 }, reference: adult }, [meal("lunch", lunchMenu())]);
-    expect(balanced.targets.energy).toEqual([]);
-    const daily = await run({ goalMode: "daily", energy: { min: 600, max: 900 }, reference: adult }, [meal("lunch", lunchMenu())]);
-    expect(daily.targets.energy).toEqual([{ min: 600, max: 900, scope: "day" }]);
-    const kcal = planLines(daily.plan.meals).reduce((s, l) => s + (l.nutrients.energy?.value ?? 0) * l.servings, 0);
-    // Soft range: within 3% of each bound.
-    expect(kcal).toBeGreaterThanOrEqual(600 * 0.97 - 1e-6);
-    expect(kcal).toBeLessThanOrEqual(900 * 1.03 + 1e-6);
+  it("plans for vitamins and minerals only when no targets are set", async () => {
+    const { targets, plan } = await run({}, [meal("lunch", lunchMenu())]);
+    expect(targets.macros).toBeNull();
+    expect(targets.amdr).toBe(true);
+    expect(plan.macroTargets ?? null).toBeNull();
+    expect(plan.energy.shown).toBe(true);
   });
 
   it("'New meal' keeps at most half of the previous items", async () => {
@@ -208,7 +193,7 @@ describe("bulk portion guard", async () => {
   });
 });
 
-describe("strict calorie and macro targets", () => {
+describe("calorie and macro targets", () => {
   const adult = { standard: "dri" as const, ageGroup: "19_30" as const, sex: "unspecified" as const };
   // Atwater-consistent synthetic items: kcal = 4P + 9F + 4C.
   const item = (id: string, p: number, f: number, c: number, extra: Partial<Record<NutrientId, number>> = {}) =>
@@ -224,19 +209,40 @@ describe("strict calorie and macro targets", () => {
   ];
   const opts = { maxItemsPerMeal: 8, maxServingsPerItem: 3 };
 
-  it("rejects targets that don't add up, by deriving calories from the macros", () => {
-    const req = planRequestSchema.parse({
-      universityId: "u", date: "2026-11-20", meals: [{ period: "lunch" }], goalMode: "daily", reference: adult,
-      macroTargets: { protein: 90, fat: 40, carbohydrate: 120, tolerancePct: 5 },
-    });
-    const t = buildTargets(req, ["lunch"]);
+  const parse = (macroTargets: Record<string, number | null>) =>
+    planRequestSchema.safeParse({ universityId: "u", date: "2026-11-20", meals: [{ period: "lunch" }], reference: adult, macroTargets });
+
+  it("derives calories from protein, fat and carbs", () => {
+    const req = parse({ protein: 90, fat: 40, carbohydrate: 120, tolerancePct: 5 });
+    const t = buildTargets(req.data!, ["lunch"]);
     expect(t.macros?.targets.energy).toBe(4 * 90 + 9 * 40 + 4 * 120);
     expect(t.amdr).toBe(false);
-    expect(t.energy).toEqual([]);
+  });
+
+  it("derives the missing macro from calories and the other two", () => {
+    const r = resolveMacroTargets({ energy: 2500, protein: 150, fat: 80, carbohydrate: null });
+    expect(r.error).toBeNull();
+    expect(r.derived).toBe("carbohydrate");
+    expect(r.targets.carbohydrate).toBe(295);
+  });
+
+  it("rejects four targets that don't add up, and macros that exceed the calories", () => {
+    expect(parse({ energy: 2000, protein: 150, fat: 80, carbohydrate: 295, tolerancePct: 5 }).success).toBe(false);
+    expect(parse({ energy: 1200, protein: 200, fat: 80, tolerancePct: 5 }).success).toBe(false);
+    expect(parse({ energy: 2500, protein: 150, fat: 80, carbohydrate: 295, tolerancePct: 5 }).success).toBe(true);
+  });
+
+  it("accepts any single target, such as protein alone", async () => {
+    const { targets, plan } = await run({ reference: adult, ...opts, macroTargets: { protein: 60, tolerancePct: 10 } }, [meal("lunch", menu())]);
+    expect(targets.macros?.targets).toEqual({ protein: 60 });
+    expect(plan.macroTargets?.map((r) => r.id)).toEqual(["protein"]);
+    const row = plan.macroTargets![0];
+    expect(row.value!).toBeGreaterThanOrEqual(row.min - 1e-6);
+    expect(row.value!).toBeLessThanOrEqual(row.max + 1e-6);
   });
 
   it("lands every total inside the tolerance band", async () => {
-    const { plan } = await run({ goalMode: "daily", reference: adult, ...opts, macroTargets: { protein: 90, fat: 40, carbohydrate: 120, tolerancePct: 5 } }, [meal("lunch", menu())]);
+    const { plan } = await run({ reference: adult, ...opts, macroTargets: { protein: 90, fat: 40, carbohydrate: 120, tolerancePct: 5 } }, [meal("lunch", menu())]);
     expect(plan.status).not.toBe("infeasible");
     expect(plan.macroTargets).toHaveLength(4);
     for (const row of plan.macroTargets!) {
@@ -246,7 +252,7 @@ describe("strict calorie and macro targets", () => {
   });
 
   it("explains which target the menus can't reach", async () => {
-    const { plan } = await run({ goalMode: "daily", reference: adult, ...opts, macroTargets: { protein: 300, fat: 10, carbohydrate: 20, tolerancePct: 3 } }, [meal("lunch", menu())]);
+    const { plan } = await run({ reference: adult, ...opts, macroTargets: { protein: 300, fat: 10, carbohydrate: 20, tolerancePct: 3 } }, [meal("lunch", menu())]);
     expect(plan.status).toBe("infeasible");
     expect(plan.infeasibility!.reasons.join(" ")).toMatch(/protein/);
     expect(plan.infeasibility!.suggestions.join(" ")).toMatch(/tolerance/);
@@ -254,14 +260,21 @@ describe("strict calorie and macro targets", () => {
 
   it("never chooses items whose macros are unknown", async () => {
     const mystery = cand("mystery", "lunch", "A", { energy: 500, protein: 40, carbohydrate: 30, iron: 18, vitamin_c: 90 }); // fat unknown
-    const { plan } = await run({ goalMode: "daily", reference: adult, ...opts, macroTargets: { protein: 90, fat: 40, carbohydrate: 120, tolerancePct: 10 } }, [meal("lunch", [...menu(), mystery])]);
+    const { plan } = await run({ reference: adult, ...opts, macroTargets: { protein: 90, fat: 40, carbohydrate: 120, tolerancePct: 10 } }, [meal("lunch", [...menu(), mystery])]);
     expect(plan.meals[0].items.map((i) => i.foodId)).not.toContain("mystery");
     expect(plan.warnings.join(" ")).toMatch(/left out/);
   });
 
-  it("ignores macro targets without an adult age group", async () => {
-    const { targets, plan } = await run({ goalMode: "daily", ...opts, macroTargets: { protein: 90, fat: 40, carbohydrate: 120, tolerancePct: 5 } }, [meal("lunch", menu())]);
-    expect(targets.macros).toBeNull();
-    expect(plan.macroTargets ?? null).toBeNull();
+  it("applies targets for anyone, including people under 19 and with no age given", async () => {
+    const teen = { standard: "dri" as const, ageGroup: "under_19" as const, sex: "female" as const };
+    for (const reference of [teen, undefined]) {
+      const { targets, plan } = await run(
+        { ...(reference ? { reference } : {}), ...opts, macroTargets: { protein: 90, fat: 40, carbohydrate: 120, tolerancePct: 5 } },
+        [meal("lunch", menu())],
+      );
+      expect(targets.macros?.targets.energy).toBe(4 * 90 + 9 * 40 + 4 * 120);
+      expect(plan.macroTargets).toHaveLength(4);
+      expect(plan.energy.shown).toBe(true);
+    }
   });
 });

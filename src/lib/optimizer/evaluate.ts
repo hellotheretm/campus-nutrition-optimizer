@@ -122,24 +122,23 @@ export async function evaluatePlan(req: PlanRequest, selection: PlanSelection, s
     warnings.push(`At the high end of the estimates, ${nutrientName(u.id)} could pass its upper intake level. Consider fewer servings of the items richest in it.`);
   }
   const e = energyTotal(lines);
-  const energyTarget = targets.energy.find((x) => x.scope === "day");
   const macroRows = targets.macros ? macroTargetRows(meals, targets.macros) : null;
+  const energyRow = macroRows?.find((r) => r.id === "energy");
 
   return {
     status: lines.length ? "feasible" : "infeasible",
     universityId: req.universityId,
     date: req.date,
     strategy: req.strategy,
-    goalMode: req.goalMode,
     referenceLabel: targets.profile.label,
     meals,
     targets: targets.summary,
     coverage,
     energy: {
       ...e,
-      min: energyTarget?.min ?? macroRows?.[0].min ?? null,
-      max: energyTarget?.max ?? macroRows?.[0].max ?? null,
-      shown: !targets.profile.isMinor,
+      min: energyRow?.min ?? null,
+      max: energyRow?.max ?? null,
+      shown: true,
     },
     macroTargets: macroRows,
     summary: summarizePlan(meals, coverage),

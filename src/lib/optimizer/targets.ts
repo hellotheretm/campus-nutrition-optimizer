@@ -3,12 +3,14 @@
  *
  * Goals come from the selected reference standard (FDA Daily Values or the
  * DRIs for an age/sex group). They are population benchmarks, not personal
- * prescriptions. People under 19 never get calorie or macro targets.
+ * prescriptions. There is one way to plan: cover as many of the day's
+ * vitamin, mineral, protein and fiber references as possible, and hit any
+ * calorie and macro targets the person set, within their tolerance.
  */
 import type { MealPeriod } from "@/db/schema";
 import { NUTRIENTS, type NutrientId } from "@/lib/nutrition/nutrients";
-import { getReferenceProfile, goalsAllowed, type ReferenceProfile } from "@/lib/nutrition/references";
-import { macroCalories, type GoalMode, type MacroId, type PlanRequest, type StrategyKey, type TargetSummary } from "./types";
+import { getReferenceProfile, type ReferenceProfile } from "@/lib/nutrition/references";
+import { hasMacroTargets, MACRO_IDS, resolveMacroTargets, type MacroId, type PlanRequest, type StrategyKey, type TargetSummary } from "./types";
 
 /** Nutrients the optimizer tries to cover. Biotin, iodine, chromium and molybdenum are left
  * out because food composition data for them is too sparse to plan with. */
@@ -111,15 +113,10 @@ export interface UlSpec {
   amount: number;
 }
 
-export interface EnergySpec {
-  min: number | null;
-  max: number | null;
-  scope: Scope;
-}
-
-/** Strict daily targets: each total must land within ±tolerance of its target. */
+/** Daily targets: each total that has a target must land within ±tolerance of it. */
 export interface MacroSpec {
-  targets: Record<MacroId, number>;
+  /** Only the targets the person set (or that 4/9/4 math filled in). */
+  targets: Partial<Record<MacroId, number>>;
   /** Fraction, e.g. 0.05 for ±5%. */
   tolerance: number;
 }
@@ -129,10 +126,9 @@ export interface Targets {
   goals: GoalSpec[];
   limits: LimitSpec[];
   uls: UlSpec[];
-  energy: EnergySpec[];
-  /** Adults only: keep protein/fat/carbohydrate within the AMDR. */
+  /** Without calorie or macro targets: keep protein/fat/carbohydrate energy within the AMDR. */
   amdr: boolean;
-  /** Strict calorie and macro targets (daily mode, adults only), or null. */
+  /** Calorie and macro targets, or null when none were set. */
   macros: MacroSpec | null;
   shares: Partial<Record<MealPeriod, number>>;
   /** Day-level summary used for coverage tables. */
@@ -155,46 +151,46 @@ function strategyWeights(strategy: StrategyKey, id: NutrientId, base: number): n
   return base;
 }
 
+const TARGET_NAMES: Record<MacroId, string> = { energy: "kcal", protein: "g protein", fat: "g fat", carbohydrate: "g carbohydrate" };
+
+/** "2,500 kcal, 150 g protein and 80 g fat" */
+export function describeMacroTargets(targets: Partial<Record<MacroId, number>>): string {
+  const parts = MACRO_IDS.filter((id) => targets[id] !== undefined).map(
+    (id) => `${Math.round(targets[id]!).toLocaleString("en-US")} ${TARGET_NAMES[id]}`,
+  );
+  return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : (parts[0] ?? "");
+}
+
 export function buildTargets(req: PlanRequest, periods: MealPeriod[]): Targets {
   const profile = getReferenceProfile(req.reference);
   const minor = profile.isMinor;
-  const mode: GoalMode = req.goalMode;
-  const shares = mealShares(periods, req.mealShares);
+  const shares = mealShares(periods);
   const notes: string[] = [];
   const focus = new Set(req.focus);
 
-  // Strict calorie and macro targets: daily mode, adults who chose an age group only.
+  // Calorie and macro targets, for anyone who sets them.
   let macros: MacroSpec | null = null;
-  if (req.macroTargets && mode === "daily") {
-    if (goalsAllowed(req.reference.ageGroup)) {
-      const m = req.macroTargets;
-      macros = {
-        targets: { energy: macroCalories(m), protein: m.protein, fat: m.fat, carbohydrate: m.carbohydrate },
-        tolerance: m.tolerancePct / 100,
-      };
-      notes.push(
-        `Strict targets: ${Math.round(macros.targets.energy).toLocaleString("en-US")} kcal, ${m.protein} g protein, ${m.fat} g fat and ${m.carbohydrate} g carbohydrate, each within ±${m.tolerancePct}%.`,
-      );
-    } else {
-      notes.push("Calorie and macro targets are only used for adults who choose an age group of 19 or older.");
+  if (hasMacroTargets(req.macroTargets)) {
+    const resolved = resolveMacroTargets(req.macroTargets!);
+    if (!resolved.error) {
+      macros = { targets: resolved.targets, tolerance: req.macroTargets!.tolerancePct / 100 };
+      notes.push(`Your targets: ${describeMacroTargets(resolved.targets)}, each within ±${req.macroTargets!.tolerancePct}%.`);
+      if (minor && resolved.targets.energy !== undefined) {
+        notes.push("Teens are still growing and need enough energy every day; a doctor or registered dietitian can help choose calorie targets.");
+      }
     }
   }
 
   const goals: GoalSpec[] = [];
   const summary: TargetSummary[] = [];
-  const perMealIds = new Set<NutrientId>();
-  if (mode === "per_meal") GOAL_NUTRIENTS.forEach((id) => perMealIds.add(id));
-  if (mode === "mixed") perMealIds.add("protein");
 
   for (const id of GOAL_NUTRIENTS) {
     const ref = profile.values[id];
     if (!ref) continue;
     let amount = ref.amount;
-    if (id === "protein" && req.proteinMin && !minor && (mode === "daily" || mode === "mixed" || mode === "per_meal")) {
-      amount = req.proteinMin;
-    }
-    if (id === "protein" && macros) amount = macros.targets.protein;
-    if (id === "protein" && req.strategy === "protein_forward" && !minor && !macros) {
+    const proteinTarget = macros?.targets.protein;
+    if (id === "protein" && proteinTarget !== undefined) amount = proteinTarget;
+    if (id === "protein" && req.strategy === "protein_forward" && proteinTarget === undefined) {
       amount *= 1.2;
       notes.push(`Protein-forward: the protein reference is raised by 20%, to ${Math.round(amount)} g.`);
     }
@@ -209,15 +205,11 @@ export function buildTargets(req: PlanRequest, periods: MealPeriod[]): Targets {
       ulCompare: ul ? (ul.compareWith ?? id) : null,
       weight,
     });
-    if (perMealIds.has(id)) {
-      for (const p of periods) goals.push({ id, target: amount * (shares[p] ?? 0), weight: weight * (shares[p] ?? 0), scope: p });
-    } else {
-      goals.push({ id, target: amount, weight, scope: "day" });
-    }
+    goals.push({ id, target: amount, weight, scope: "day" });
   }
 
-  // Balanced day: also spread protein across meals (each meal gets at least half its share).
-  if (mode === "balanced" && periods.length > 1) {
+  // Spread protein across meals a little (each meal gets at least half its share).
+  if (periods.length > 1) {
     const protein = summary.find((s) => s.id === "protein");
     if (protein?.amount) {
       for (const p of periods) {
@@ -238,11 +230,7 @@ export function buildTargets(req: PlanRequest, periods: MealPeriod[]): Targets {
     }
     if (focus.has(id)) weight *= 2;
     summary.push({ id, kind: "limit", amount, ul: null, ulCompare: null, weight });
-    if (mode === "per_meal") {
-      for (const p of periods) limits.push({ id, limit: amount * (shares[p] ?? 0), weight: weight * (shares[p] ?? 0), scope: p });
-    } else {
-      limits.push({ id, limit: amount, weight, scope: "day" });
-    }
+    limits.push({ id, limit: amount, weight, scope: "day" });
   }
 
   const uls: UlSpec[] = [];
@@ -252,22 +240,6 @@ export function buildTargets(req: PlanRequest, periods: MealPeriod[]): Targets {
     uls.push({ id, compare: ul.compareWith ?? id, amount: ul.amount });
   }
 
-  // Energy: never for minors; only in modes that use explicit goals, and only when the user set a range.
-  const energy: EnergySpec[] = [];
-  // Strict macro targets replace the calorie range.
-  const wantsEnergy = req.energy && (req.energy.min || req.energy.max) && mode !== "balanced" && !macros;
-  if (minor && req.energy && (req.energy.min || req.energy.max)) {
-    notes.push("Calorie targets are not used for people under 19; the plan focuses on balanced, varied meals instead.");
-  } else if (wantsEnergy && req.energy) {
-    const { min, max } = req.energy;
-    if (mode === "daily") energy.push({ min, max, scope: "day" });
-    else {
-      for (const p of periods) {
-        const s = shares[p] ?? 0;
-        energy.push({ min: min ? min * s : null, max: max ? max * s : null, scope: p });
-      }
-    }
-  }
   summary.push({ id: "energy", kind: "info", amount: null, ul: null, ulCompare: null, weight: 0 });
 
   if (minor) notes.push("Using Dietary Reference Intakes for ages 14–18.");
@@ -278,9 +250,8 @@ export function buildTargets(req: PlanRequest, periods: MealPeriod[]): Targets {
     goals,
     limits,
     uls,
-    energy,
-    // Explicit macro targets replace the AMDR ranges.
-    amdr: !minor && !macros,
+    // Calorie or macro targets replace the gentle AMDR ranges.
+    amdr: !macros,
     macros,
     shares,
     summary,

@@ -3,7 +3,7 @@ import { coverageOf, groupByDate, overallConfidence, totalsOf } from "@/lib/nutr
 import { parseIngredientStatement, splitTopLevel } from "@/lib/nutrition/ingredients";
 import { labelInterval, roundForLabel } from "@/lib/nutrition/label-rounding";
 import type { NutrientEstimate } from "@/lib/nutrition/estimator";
-import { getReferenceProfile, goalsAllowed, isMinorAgeGroup } from "@/lib/nutrition/references";
+import { getReferenceProfile, isMinorAgeGroup } from "@/lib/nutrition/references";
 
 const est = (value: number | null, confidence: NutrientEstimate["confidence"] = "high"): NutrientEstimate => ({
   value,
@@ -68,11 +68,9 @@ describe("FDA label rounding", () => {
 });
 
 describe("references and goals", () => {
-  it("never allows calorie goals for people under 19 or with no age given", () => {
-    expect(goalsAllowed("under_19")).toBe(false);
-    expect(goalsAllowed("unspecified")).toBe(false);
-    expect(goalsAllowed("19_30")).toBe(true);
+  it("uses the 14–18 reference values for people under 19", () => {
     expect(isMinorAgeGroup("under_19")).toBe(true);
+    expect(getReferenceProfile({ standard: "fda_dv", ageGroup: "under_19", sex: "female" }).isMinor).toBe(true);
   });
 
   it("uses FDA Daily Values by default", () => {

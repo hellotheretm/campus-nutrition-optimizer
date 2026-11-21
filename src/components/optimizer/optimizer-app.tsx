@@ -11,9 +11,8 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { formatDate } from "@/lib/dates";
 import { MEAL_PERIOD_LABELS } from "@/lib/menus/types";
-import { goalsAllowed } from "@/lib/nutrition/references";
 import { explainItems } from "@/lib/optimizer/coverage";
-import { GOAL_MODES, macroCalories, STRATEGIES, type MenuChoice, type PlanMeal, type PlanPeriod, type PlanRequest, type PlanRequestInput, type PlanResult, type TargetSummary } from "@/lib/optimizer/types";
+import { hasMacroTargets, resolveMacroTargets, STRATEGIES, type MenuChoice, type PlanMeal, type PlanPeriod, type PlanRequest, type PlanRequestInput, type PlanResult, type TargetSummary } from "@/lib/optimizer/types";
 import { MealCard } from "./meal-card";
 import { CompareDialog, DiffDialog, SaveDialog, type StrategyOption } from "./plan-dialogs";
 import { PlanInputs } from "./plan-inputs";
@@ -141,45 +140,21 @@ export function OptimizerApp({
   }
 
   function validateGoals(): string | null {
-    if (!goalsAllowed(inputs.reference.ageGroup) || inputs.goalMode === "balanced") return null;
-    if (inputs.goalMode === "daily" && inputs.strict.enabled) {
-      const { protein, fat, carbohydrate } = inputs.strict;
-      if (protein === null || fat === null || carbohydrate === null) return "Enter protein, fat and carbs for strict targets.";
-      if (protein < 20 || protein > 400) return "Protein needs to be between 20 and 400 g.";
-      if (fat < 10 || fat > 300) return "Fat needs to be between 10 and 300 g.";
-      if (carbohydrate < 20 || carbohydrate > 900) return "Carbs need to be between 20 and 900 g.";
-      const kcal = macroCalories({ protein, fat, carbohydrate });
-      if (kcal < 1000 || kcal > 6000) return "Calories from these macros need to be between 1,000 and 6,000.";
-      return null;
-    }
-    const { energyMin: lo, energyMax: hi, proteinMin: p } = inputs;
-    if ((lo !== null && (lo < 600 || lo > 6000)) || (hi !== null && (hi < 600 || hi > 6000))) return "Calorie values need to be between 600 and 6,000.";
-    if (lo !== null && hi !== null && lo > hi) return "The calorie minimum is higher than the maximum.";
-    if (p !== null && (p < 10 || p > 300)) return "Protein needs to be between 10 and 300 g.";
-    return null;
+    return hasMacroTargets(inputs.targets) ? resolveMacroTargets(inputs.targets).error : null;
   }
 
   function buildRequest(): PlanRequestInput {
     const meals = availability
       .filter((a) => inputs.meals[a.period].enabled && servable(a).length > 0)
       .map((a) => ({ period: a.period, locationIds: inputs.meals[a.period].locationIds.filter((id) => servable(a).some((l) => l.id === id)) }));
-    const adult = goalsAllowed(inputs.reference.ageGroup) && inputs.goalMode !== "balanced";
-    const s = inputs.strict;
-    const strict =
-      adult && inputs.goalMode === "daily" && s.enabled && s.protein !== null && s.fat !== null && s.carbohydrate !== null
-        ? { protein: s.protein, fat: s.fat, carbohydrate: s.carbohydrate, tolerancePct: s.tolerancePct }
-        : null;
     const locks = working && working.request.date === date ? lockedOf(working.meals).filter((l) => meals.some((m) => m.period === l.period)) : [];
     return {
       universityId: university.id,
       date,
       meals,
-      goalMode: inputs.goalMode,
       strategy: inputs.strategy,
       reference: inputs.reference,
-      energy: adult && !strict && (inputs.energyMin || inputs.energyMax) ? { min: inputs.energyMin, max: inputs.energyMax } : null,
-      proteinMin: adult && !strict ? inputs.proteinMin : null,
-      macroTargets: strict,
+      macroTargets: hasMacroTargets(inputs.targets) ? inputs.targets : null,
       focus: inputs.focus,
       preferences: inputs.preferences,
       maxItemsPerMeal: inputs.maxItemsPerMeal,
@@ -462,7 +437,7 @@ export function OptimizerApp({
                   </h2>
                   <p className="mt-1 flex flex-wrap gap-1.5 text-xs">
                     <Tag>{STRATEGIES[working.request.strategy].label}</Tag>
-                    <Tag>{GOAL_MODES[working.request.goalMode].label}</Tag>
+                    {working.result.macroTargets?.length ? <Tag>Your targets ±{working.request.macroTargets?.tolerancePct ?? 5}%</Tag> : null}
                     {working.edited && <Tag>Edited by you</Tag>}
                     {working.planId && (
                       <Tag>

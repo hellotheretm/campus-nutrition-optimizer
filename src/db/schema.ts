@@ -285,7 +285,15 @@ export interface DietaryPreferences {
 }
 
 export interface ProfileGoals {
-  /** Optional calorie range (adults only; never stored for people under 19). */
+  /** Daily calorie and macro targets (any may be blank), used as optimizer defaults and shown in the diary. */
+  targets?: {
+    energy: number | null;
+    protein: number | null;
+    fat: number | null;
+    carbohydrate: number | null;
+    tolerancePct: 3 | 5 | 10;
+  };
+  /** Older format: a calorie range and a protein minimum. Read once and converted to `targets`. */
   calorieGoal?: { min: number | null; max: number | null };
   proteinGoal?: number | null;
 }

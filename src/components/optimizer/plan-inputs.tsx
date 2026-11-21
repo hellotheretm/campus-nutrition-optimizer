@@ -3,14 +3,14 @@
 import { ChevronDown, ExternalLink, Info, Loader2, MapPin, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useId, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Panel } from "@/components/app/page-header";
 import { DateNav } from "@/components/common/date-nav";
+import { TargetsFields } from "@/components/nutrition/targets-fields";
 import { TagInput } from "@/components/settings/tag-input";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -19,10 +19,10 @@ import { Switch } from "@/components/ui/switch";
 import { plainName } from "@/lib/format";
 import { ALLERGEN_LABELS, MAJOR_ALLERGENS } from "@/lib/menus/labels";
 import type { NutrientId } from "@/lib/nutrition/nutrients";
-import { AGE_GROUP_LABELS, goalsAllowed, type AgeGroup } from "@/lib/nutrition/references";
-import { GOAL_MODES, KCAL_PER_GRAM, macroCalories, MACRO_TOLERANCES, STRATEGIES, STRATEGY_KEYS, type GoalMode, type StrategyKey } from "@/lib/optimizer/types";
+import { AGE_GROUP_LABELS, type AgeGroup } from "@/lib/nutrition/references";
+import { STRATEGIES, STRATEGY_KEYS, type StrategyKey } from "@/lib/optimizer/types";
 import { cn } from "@/lib/utils";
-import { servable, type Inputs, type OptimizerUniversity, type PeriodAvailability, type StrictTargets } from "./shared";
+import { servable, type Inputs, type OptimizerUniversity, type PeriodAvailability } from "./shared";
 
 const FOCUS_OPTIONS: NutrientId[] = [
   "protein",
@@ -39,12 +39,6 @@ const FOCUS_OPTIONS: NutrientId[] = [
   "vitamin_a",
   "sodium",
 ];
-
-function numOrNull(raw: string): number | null {
-  if (raw.trim() === "") return null;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : null;
-}
 
 export function PlanInputs({
   inputs,
@@ -85,7 +79,6 @@ export function PlanInputs({
   const enabledCount = availability.filter((a) => inputs.meals[a.period].enabled && servable(a).length > 0).length;
   const offered = availability.filter((a) => a.locations.length > 0);
   const demo = universities.find((u) => u.isDemo && u.id !== university.id);
-  const adult = goalsAllowed(inputs.reference.ageGroup);
   const set = <K extends keyof Inputs>(key: K, value: Inputs[K]) => setInputs((p) => ({ ...p, [key]: value }));
   const setDiet = <K extends keyof Inputs["preferences"]>(key: K, value: Inputs["preferences"][K]) =>
     setInputs((p) => ({ ...p, preferences: { ...p.preferences, [key]: value } }));
@@ -98,7 +91,10 @@ export function PlanInputs({
     prefs.excludedIngredients.length +
     prefs.dislikes.length;
   const summary = [
-    inputs.reference.standard === "dri" ? `DRIs, ${AGE_GROUP_LABELS[inputs.reference.ageGroup].toLowerCase()}` : "FDA Daily Values",
+    // People under 19 always get the DRIs for ages 14–18 (see getReferenceProfile).
+    inputs.reference.standard === "dri" || inputs.reference.ageGroup === "under_19"
+      ? `DRIs, ${AGE_GROUP_LABELS[inputs.reference.ageGroup].toLowerCase()}`
+      : "FDA Daily Values",
     filterCount ? `${filterCount} food filter${filterCount === 1 ? "" : "s"}` : "no food filters",
     prefs.preferred.length ? `${prefs.preferred.length} favorite${prefs.preferred.length === 1 ? "" : "s"}` : null,
     `up to ${inputs.maxItemsPerMeal} items per meal`,
@@ -180,32 +176,24 @@ export function PlanInputs({
         </div>
       </fieldset>
 
-      <fieldset className="grid gap-3">
-        <legend className="mb-2 text-sm font-medium">What to aim for</legend>
-        <RadioGroup
-          value={inputs.goalMode}
-          onValueChange={(v) => set("goalMode", v as GoalMode)}
-          className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"
-          aria-label="Goal mode"
-        >
-          {(Object.keys(GOAL_MODES) as GoalMode[]).map((m) => (
-            <Label
-              key={m}
-              htmlFor={`mode-${m}`}
-              className={cn(
-                "flex cursor-pointer items-start gap-3 rounded-2xl p-3 font-normal ring-1 ring-border transition-colors hover:bg-muted/60",
-                inputs.goalMode === m && "bg-accent/60 ring-2 ring-primary/60",
-              )}
-            >
-              <RadioGroupItem id={`mode-${m}`} value={m} className="mt-0.5" />
-              <span className="grid gap-0.5">
-                <span className="font-medium">{GOAL_MODES[m].label}</span>
-                <span className="text-xs leading-snug text-muted-foreground">{GOAL_MODES[m].description}</span>
-              </span>
-            </Label>
-          ))}
-        </RadioGroup>
-      </fieldset>
+      <section aria-labelledby="targets-heading" className="grid gap-3 rounded-2xl bg-muted/50 p-4">
+        <div>
+          <h3 id="targets-heading" className="text-sm font-medium">
+            Daily targets (optional)
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            Every plan covers as many vitamin, mineral, protein and fiber references as the menus allow. Any target you set here
+            is hit within your tolerance, as close to exact as possible.
+          </p>
+        </div>
+        <TargetsFields value={inputs.targets} onChange={(v) => set("targets", v)} />
+        <p className="text-xs text-muted-foreground">
+          These are your own numbers; the app never sets or suggests a calorie deficit. Items without known values for a target
+          aren&apos;t used, and food labels round, so totals can differ slightly from 4/9/4 math.
+          {inputs.reference.ageGroup === "under_19" &&
+            " Teens are still growing and need enough energy every day; a doctor or registered dietitian can help choose calorie targets."}
+        </p>
+      </section>
 
       <div className="grid gap-4 md:grid-cols-[minmax(0,18rem)_minmax(0,1fr)] md:items-start">
         <div className="grid gap-1.5">
@@ -225,30 +213,6 @@ export function PlanInputs({
         </div>
         <p className="text-sm text-muted-foreground md:pt-7">{STRATEGIES[inputs.strategy].description}</p>
       </div>
-
-      {inputs.goalMode === "daily" && adult && <StrictTargetsBox value={inputs.strict} onChange={(v) => set("strict", v)} />}
-
-      {inputs.goalMode !== "balanced" && !(inputs.goalMode === "daily" && adult && inputs.strict.enabled) && (
-        <div className="grid gap-3 rounded-2xl bg-muted/50 p-4">
-          <p className="text-sm font-medium">Calorie and protein goals (optional)</p>
-          {adult ? (
-            <>
-              <div className="grid gap-3 sm:grid-cols-3">
-                <NumberField id="kcal-min" label="Calories, at least" suffix="kcal" value={inputs.energyMin} onChange={(v) => set("energyMin", v)} min={600} max={6000} />
-                <NumberField id="kcal-max" label="Calories, at most" suffix="kcal" value={inputs.energyMax} onChange={(v) => set("energyMax", v)} min={600} max={6000} />
-                <NumberField id="protein-min" label="Protein, at least" suffix="g" value={inputs.proteinMin} onChange={(v) => set("proteinMin", v)} min={10} max={300} />
-              </div>
-              <p className="text-xs text-muted-foreground">Leave blank for no target. These are your own references; the app never sets a calorie deficit for you.</p>
-            </>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              {inputs.reference.ageGroup === "under_19"
-                ? "Calorie and protein targets aren't used for people under 19. Plans focus on balanced, varied meals."
-                : "Calorie and protein goals are offered to adults who choose an age group of 19 or older under More options. Plans still balance vitamins, minerals, protein and fiber without them."}
-            </p>
-          )}
-        </div>
-      )}
 
       <Collapsible open={moreOpen} onOpenChange={setMoreOpen} className="grid grid-cols-1 gap-4">
         <CollapsibleTrigger asChild>
@@ -514,144 +478,6 @@ function SwitchInline({ id, label, checked, onChange }: { id: string; label: str
       <Label htmlFor={id} className="font-normal">
         {label}
       </Label>
-    </div>
-  );
-}
-
-/**
- * Strict daily targets. Calories are always computed as 4 × protein + 9 × fat + 4 × carbs,
- * so the four numbers can't disagree; typing a calorie total adjusts carbs to match.
- */
-function StrictTargetsBox({ value, onChange }: { value: StrictTargets; onChange: (v: StrictTargets) => void }) {
-  const uid = useId();
-  const [kcalDraft, setKcalDraft] = useState<string | null>(null);
-  const { protein, fat, carbohydrate } = value;
-  const complete = protein !== null && fat !== null && carbohydrate !== null;
-  const kcal = complete ? macroCalories({ protein, fat, carbohydrate }) : null;
-  const update = (patch: Partial<StrictTargets>) => onChange({ ...value, ...patch });
-
-  function commitCalories(raw: string) {
-    setKcalDraft(null);
-    const target = numOrNull(raw);
-    if (target === null || protein === null || fat === null) return;
-    const carbs = Math.max(0, Math.round((target - protein * KCAL_PER_GRAM.protein - fat * KCAL_PER_GRAM.fat) / KCAL_PER_GRAM.carbohydrate));
-    update({ carbohydrate: carbs });
-  }
-
-  const share = (grams: number, perGram: number) => (kcal ? Math.round(((grams * perGram) / kcal) * 100) : 0);
-
-  return (
-    <div className="grid gap-3 rounded-2xl bg-muted/50 p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <Label htmlFor={`${uid}-on`} className="text-sm font-medium">
-            Strict calorie and macro targets
-          </Label>
-          <p id={`${uid}-hint`} className="text-xs text-muted-foreground">
-            The plan must land within your tolerance on all four, as close to exact as the menus allow.
-          </p>
-        </div>
-        <Switch id={`${uid}-on`} aria-describedby={`${uid}-hint`} checked={value.enabled} onCheckedChange={(enabled) => update({ enabled })} />
-      </div>
-      {value.enabled && (
-        <>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <div className="grid gap-1.5">
-              <Label htmlFor={`${uid}-kcal`}>Calories</Label>
-              <div className="relative">
-                <Input
-                  id={`${uid}-kcal`}
-                  type="number"
-                  inputMode="numeric"
-                  min={1000}
-                  max={6000}
-                  value={kcalDraft ?? (kcal !== null ? Math.round(kcal) : "")}
-                  onChange={(e) => setKcalDraft(e.target.value)}
-                  onBlur={(e) => commitCalories(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") commitCalories(e.currentTarget.value);
-                  }}
-                  aria-describedby={`${uid}-kcal-hint`}
-                  placeholder="Auto"
-                  className="pr-12"
-                />
-                <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm text-muted-foreground">kcal</span>
-              </div>
-            </div>
-            <NumberField id={`${uid}-p`} label="Protein" suffix="g" value={protein} onChange={(v) => update({ protein: v })} min={20} max={400} placeholder="Grams" />
-            <NumberField id={`${uid}-f`} label="Fat" suffix="g" value={fat} onChange={(v) => update({ fat: v })} min={10} max={300} placeholder="Grams" />
-            <NumberField id={`${uid}-c`} label="Carbs" suffix="g" value={carbohydrate} onChange={(v) => update({ carbohydrate: v })} min={20} max={900} placeholder="Grams" />
-          </div>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            <div className="flex items-center gap-2">
-              <Label htmlFor={`${uid}-tol`} className="text-sm">
-                Tolerance
-              </Label>
-              <Select value={String(value.tolerancePct)} onValueChange={(v) => update({ tolerancePct: Number(v) as StrictTargets["tolerancePct"] })}>
-                <SelectTrigger id={`${uid}-tol`} className="h-8 w-24">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {MACRO_TOLERANCES.map((t) => (
-                    <SelectItem key={t} value={String(t)}>
-                      ±{t}%
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <p id={`${uid}-kcal-hint`} className="min-w-0 text-xs text-muted-foreground" aria-live="polite">
-              {complete
-                ? `${protein} g × 4 + ${fat} g × 9 + ${carbohydrate} g × 4 = ${Math.round(kcal!).toLocaleString("en-US")} kcal · protein ${share(protein, 4)}%, fat ${share(fat, 9)}%, carbs ${share(carbohydrate, 4)}% of calories`
-                : "Enter protein and fat, then either carbs or a calorie total (carbs fill in to match)."}
-            </p>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            These are your own targets; the app never sets a calorie deficit for you. Items without known calories and macros
-            aren&apos;t used, and food labels round their numbers, so totals can differ slightly from 4/9/4 math.
-          </p>
-        </>
-      )}
-    </div>
-  );
-}
-
-function NumberField({
-  id,
-  label,
-  suffix,
-  value,
-  onChange,
-  min,
-  max,
-  placeholder,
-}: {
-  id: string;
-  label: string;
-  suffix: string;
-  value: number | null;
-  onChange: (v: number | null) => void;
-  min: number;
-  max: number;
-  placeholder?: string;
-}) {
-  return (
-    <div className="grid gap-1.5">
-      <Label htmlFor={id}>{label}</Label>
-      <div className="relative">
-        <Input
-          id={id}
-          type="number"
-          inputMode="numeric"
-          min={min}
-          max={max}
-          value={value ?? ""}
-          onChange={(e) => onChange(numOrNull(e.target.value))}
-          placeholder={placeholder ?? "No target"}
-          className="pr-12"
-        />
-        <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm text-muted-foreground">{suffix}</span>
-      </div>
     </div>
   );
 }

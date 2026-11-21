@@ -6,6 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { requireUser } from "@/lib/auth";
 import { defaultUniversity, getUniversity } from "@/lib/data/catalog";
 import { getProfile, listDiary } from "@/lib/data/user";
+import { resolveMacroTargets } from "@/lib/optimizer/types";
 import { addDays, isIsoDate, todayIn } from "@/lib/dates";
 import { getReferenceProfile } from "@/lib/nutrition/references";
 
@@ -75,8 +76,7 @@ async function DiaryContent({ searchParams }: { searchParams: SearchParams }) {
     fdcId: r.fdcId,
     nutrients: r.nutrients,
   }));
-  const minor = profile.ageGroup === "under_19";
-  const goal = profile.calorieGoal;
+  const targets = resolveMacroTargets(profile.targets);
 
   return (
     <DiaryView
@@ -88,8 +88,7 @@ async function DiaryContent({ searchParams }: { searchParams: SearchParams }) {
       reference={reference}
       showCalories={profile.showCalories}
       showPercentages={profile.showPercentages}
-      calorieGoal={!minor && (goal.min || goal.max) ? goal : null}
-      proteinGoal={minor ? null : profile.proteinGoal}
+      targets={targets.error ? {} : targets.targets}
       university={university ? { id: university.id, name: university.name, isDemo: university.isDemo } : null}
     />
   );

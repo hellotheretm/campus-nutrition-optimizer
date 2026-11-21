@@ -14,7 +14,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import type { ProfileData } from "@/lib/data/user";
 import { ALLERGEN_LABELS, MAJOR_ALLERGENS } from "@/lib/menus/labels";
-import { AGE_GROUP_LABELS, goalsAllowed, type AgeGroup, type ReferenceSex } from "@/lib/nutrition/references";
+import { TargetsFields } from "@/components/nutrition/targets-fields";
+import { AGE_GROUP_LABELS, type AgeGroup, type ReferenceSex } from "@/lib/nutrition/references";
+import { resolveMacroTargets } from "@/lib/optimizer/types";
 import { cn } from "@/lib/utils";
 
 interface UniversityOption {
@@ -52,19 +54,12 @@ function SwitchRow({ id, label, hint, checked, onChange }: { id: string; label: 
   );
 }
 
-function numOrNull(raw: string): number | null {
-  if (raw.trim() === "") return null;
-  const n = Number(raw);
-  return Number.isFinite(n) ? Math.round(n) : null;
-}
-
 export function ProfileForm({ initial, universities }: { initial: ProfileData; universities: UniversityOption[] }) {
   const [saved, setSaved] = useState(initial);
   const [p, setP] = useState(initial);
   const [error, setError] = useState<string | null>(null);
   const [pending, start] = useTransition();
   const dirty = JSON.stringify(p) !== JSON.stringify(saved);
-  const adultGoals = goalsAllowed(p.ageGroup);
 
   const set = <K extends keyof ProfileData>(key: K, value: ProfileData[K]) => setP((cur) => ({ ...cur, [key]: value }));
   const setDiet = <K extends keyof ProfileData["dietary"]>(key: K, value: ProfileData["dietary"][K]) =>
@@ -72,16 +67,10 @@ export function ProfileForm({ initial, universities }: { initial: ProfileData; u
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    const { min, max } = p.calorieGoal;
-    if (adultGoals) {
-      if ((min !== null && (min < 800 || min > 6000)) || (max !== null && (max < 800 || max > 6000))) {
-        return setError("Calorie values should be between 800 and 6,000.");
-      }
-      if (min !== null && max !== null && min > max) return setError("The lower calorie value should not be above the upper one.");
-      if (p.proteinGoal !== null && (p.proteinGoal < 10 || p.proteinGoal > 300)) return setError("Protein should be between 10 and 300 g.");
-    }
+    const targetError = resolveMacroTargets(p.targets).error;
+    if (targetError) return setError(targetError);
     setError(null);
-    const payload: ProfileData = adultGoals ? p : { ...p, calorieGoal: { min: null, max: null }, proteinGoal: null };
+    const payload: ProfileData = p;
     start(async () => {
       const res = await saveProfileAction(payload);
       if (!res.ok) return setError(res.error);
@@ -187,8 +176,7 @@ export function ProfileForm({ initial, universities }: { initial: ProfileData; u
         </div>
         {p.ageGroup === "under_19" && (
           <p className="rounded-xl bg-muted/70 p-3 text-sm text-muted-foreground">
-            For people under 19 the app uses age-appropriate reference values and focuses on balanced, varied meals. It does not offer
-            calorie or macro targets.
+            For people under 19 the app uses reference values for ages 14–18.
           </p>
         )}
       </Section>
@@ -271,61 +259,15 @@ export function ProfileForm({ initial, universities }: { initial: ProfileData; u
 
       <Section
         id="goals-heading"
-        title="Personal goals (optional)"
-        description="You never need goals to use the diary or the optimizer. Calorie and protein goals are available to adults 19 and older."
+        title="Daily targets (optional)"
+        description="Used as the starting targets in the meal optimizer and shown in the diary. You never need targets to use either."
       >
-        {!adultGoals ? (
-          <p className="rounded-xl bg-muted/70 p-3 text-sm text-muted-foreground">
-            {p.ageGroup === "under_19"
-              ? "Calorie and protein goals aren’t offered for people under 19."
-              : "Choose an age group of 19 or older above to set calorie or protein goals."}
-          </p>
-        ) : (
-          <div className="grid gap-4 sm:grid-cols-3">
-            <div className="grid gap-1.5">
-              <Label htmlFor="kcal-min">Calories, lower (kcal)</Label>
-              <Input
-                id="kcal-min"
-                type="number"
-                inputMode="numeric"
-                min={800}
-                max={6000}
-                step={50}
-                value={p.calorieGoal.min ?? ""}
-                onChange={(e) => set("calorieGoal", { ...p.calorieGoal, min: numOrNull(e.target.value) })}
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="kcal-max">Calories, upper (kcal)</Label>
-              <Input
-                id="kcal-max"
-                type="number"
-                inputMode="numeric"
-                min={800}
-                max={6000}
-                step={50}
-                value={p.calorieGoal.max ?? ""}
-                onChange={(e) => set("calorieGoal", { ...p.calorieGoal, max: numOrNull(e.target.value) })}
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="protein-goal">Protein, at least (g)</Label>
-              <Input
-                id="protein-goal"
-                type="number"
-                inputMode="numeric"
-                min={10}
-                max={300}
-                value={p.proteinGoal ?? ""}
-                onChange={(e) => set("proteinGoal", numOrNull(e.target.value))}
-              />
-            </div>
-            <p className="text-xs text-muted-foreground sm:col-span-3">
-              The app never sets a calorie deficit for you. If you are working toward a medical or weight goal, a registered dietitian
-              can help choose numbers that fit you.
-            </p>
-          </div>
-        )}
+        <TargetsFields value={p.targets} onChange={(v) => set("targets", v)} />
+        <p className="text-xs text-muted-foreground">
+          The app never sets a calorie deficit for you. If you are working toward a medical, weight or sports goal, a registered
+          dietitian can help choose numbers that fit you.
+          {p.ageGroup === "under_19" && " Teens are still growing and need enough energy every day."}
+        </p>
       </Section>
 
       <Section id="display-heading" title="Display">

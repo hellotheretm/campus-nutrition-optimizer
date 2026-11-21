@@ -35,27 +35,6 @@ export const STRATEGIES = {
 export type StrategyKey = keyof typeof STRATEGIES;
 export const STRATEGY_KEYS = Object.keys(STRATEGIES) as StrategyKey[];
 
-export const GOAL_MODES = {
-  balanced: {
-    label: "Balanced day",
-    description: "Covers the day's vitamin and mineral references with protein spread across meals. No calorie target.",
-  },
-  daily: {
-    label: "Daily goals",
-    description: "Meets your daily references, with optional strict calorie, protein, fat and carb targets (adults).",
-  },
-  per_meal: {
-    label: "Per-meal goals",
-    description: "Splits the day's references across meals so each meal pulls its weight.",
-  },
-  mixed: {
-    label: "Mixed",
-    description: "Calories and protein per meal; vitamins and minerals across the whole day.",
-  },
-} as const;
-
-export type GoalMode = keyof typeof GOAL_MODES;
-
 export const PLAN_PERIODS = ["breakfast", "brunch", "lunch", "dinner", "late_night"] as const;
 export type PlanPeriod = (typeof PLAN_PERIODS)[number];
 
@@ -84,22 +63,103 @@ export function macroCalories(m: { protein: number; fat: number; carbohydrate: n
   return m.protein * KCAL_PER_GRAM.protein + m.fat * KCAL_PER_GRAM.fat + m.carbohydrate * KCAL_PER_GRAM.carbohydrate;
 }
 
+export type MacroId = "energy" | "protein" | "fat" | "carbohydrate";
+export const MACRO_IDS: readonly MacroId[] = ["energy", "protein", "fat", "carbohydrate"];
+export type Tolerance = (typeof MACRO_TOLERANCES)[number];
+
+/** Allowed range for each target (kcal for energy, grams otherwise). */
+export const MACRO_LIMITS: Record<MacroId, { min: number; max: number }> = {
+  energy: { min: 1000, max: 6000 },
+  protein: { min: 10, max: 400 },
+  fat: { min: 10, max: 300 },
+  carbohydrate: { min: 20, max: 900 },
+};
+
+const MACRO_WORDS: Record<MacroId, string> = { energy: "Calories", protein: "Protein", fat: "Fat", carbohydrate: "Carbs" };
+const MACRO_UNITS: Record<MacroId, string> = { energy: "kcal", protein: "g", fat: "g", carbohydrate: "g" };
+
 /**
- * Strict daily targets (daily goal mode, adults only). Calories are not sent:
- * they are always 4P + 9F + 4C, so the four targets can't disagree.
+ * Daily calorie and macro targets. Any of the four may be left blank (null).
+ * They are kept consistent with 4/9/4 math: with protein, fat and carbs set,
+ * calories are 4P + 9F + 4C; with calories and two macros set, the third is
+ * calculated; all four set must add up exactly.
  */
 export const macroTargetsSchema = z
   .object({
-    protein: z.number().min(20).max(400),
-    fat: z.number().min(10).max(300),
-    carbohydrate: z.number().min(20).max(900),
+    energy: z.number().nullable().default(null),
+    protein: z.number().nullable().default(null),
+    fat: z.number().nullable().default(null),
+    carbohydrate: z.number().nullable().default(null),
     /** Allowed deviation from each target, in percent. */
     tolerancePct: z.union([z.literal(3), z.literal(5), z.literal(10)]).default(5),
   })
-  .refine((m) => macroCalories(m) >= 1000 && macroCalories(m) <= 6000, "Calories from these macros must be between 1,000 and 6,000.");
+  .superRefine((m, ctx) => {
+    const r = resolveMacroTargets(m);
+    if (r.error) ctx.addIssue({ code: "custom", message: r.error });
+  });
 
 export type MacroTargets = z.infer<typeof macroTargetsSchema>;
-export type MacroId = "energy" | "protein" | "fat" | "carbohydrate";
+export type MacroTargetsInput = Pick<MacroTargets, MacroId> & { tolerancePct: Tolerance };
+
+export interface ResolvedMacroTargets {
+  /** Every target that applies, including a calculated one. */
+  targets: Partial<Record<MacroId, number>>;
+  /** The target filled in by 4/9/4 math, if any. */
+  derived: MacroId | null;
+  /** Why the combination can't be used, or null. */
+  error: string | null;
+}
+
+const fmtTarget = (id: MacroId, v: number) => `${Math.round(v).toLocaleString("en-US")} ${MACRO_UNITS[id]}`;
+
+/** Fills in whatever 4/9/4 math determines and checks the targets agree and are in range. */
+export function resolveMacroTargets(m: Pick<MacroTargets, MacroId>): ResolvedMacroTargets {
+  const set = (v: number | null | undefined): v is number => typeof v === "number" && Number.isFinite(v);
+  const t: Partial<Record<MacroId, number>> = {};
+  for (const id of MACRO_IDS) if (set(m[id])) t[id] = m[id]!;
+  let derived: MacroId | null = null;
+  const grams = (["protein", "fat", "carbohydrate"] as const).filter((id) => t[id] !== undefined);
+
+  if (grams.length === 3) {
+    const kcal = macroCalories({ protein: t.protein!, fat: t.fat!, carbohydrate: t.carbohydrate! });
+    if (t.energy !== undefined && Math.abs(t.energy - kcal) > 0.5) {
+      return {
+        targets: t,
+        derived: null,
+        error: `Calories don't match your macros: ${t.protein} g × 4 + ${t.fat} g × 9 + ${t.carbohydrate} g × 4 = ${fmtTarget("energy", kcal)}. Clear one of the four to have it calculated.`,
+      };
+    }
+    if (t.energy === undefined) derived = "energy";
+    t.energy = kcal;
+  } else if (grams.length === 2 && t.energy !== undefined) {
+    const missing = (["protein", "fat", "carbohydrate"] as const).find((id) => t[id] === undefined)!;
+    const used = grams.reduce((s, id) => s + t[id]! * KCAL_PER_GRAM[id], 0);
+    t[missing] = Math.round(((t.energy - used) / KCAL_PER_GRAM[missing]) * 10) / 10;
+    derived = missing;
+  }
+
+  for (const id of MACRO_IDS) {
+    const v = t[id];
+    if (v === undefined) continue;
+    const { min, max } = MACRO_LIMITS[id];
+    if (v < min || v > max) {
+      const why = derived === id ? ` (calculated from the other targets as ${fmtTarget(id, v)})` : "";
+      return { targets: t, derived, error: `${MACRO_WORDS[id]} must be between ${fmtTarget(id, min)} and ${fmtTarget(id, max)}${why}.` };
+    }
+  }
+  if (t.energy !== undefined && grams.length > 0 && grams.length < 3 && derived === null) {
+    const used = grams.reduce((s, id) => s + t[id]! * KCAL_PER_GRAM[id], 0);
+    if (used > t.energy) {
+      return { targets: t, derived, error: `Your macros alone add up to ${fmtTarget("energy", used)}, more than your ${fmtTarget("energy", t.energy)} calorie target.` };
+    }
+  }
+  return { targets: t, derived, error: null };
+}
+
+/** True when at least one target is set. */
+export function hasMacroTargets(m: Pick<MacroTargets, MacroId> | null | undefined): boolean {
+  return Boolean(m && MACRO_IDS.some((id) => typeof m[id] === "number"));
+}
 
 export interface MacroTargetRow {
   id: MacroId;
@@ -125,7 +185,6 @@ export const planRequestSchema = z.object({
     )
     .min(1)
     .max(5),
-  goalMode: z.enum(["balanced", "daily", "per_meal", "mixed"]).default("balanced"),
   strategy: z.enum(STRATEGY_KEYS as [StrategyKey, ...StrategyKey[]]).default("balanced"),
   reference: z
     .object({
@@ -134,17 +193,8 @@ export const planRequestSchema = z.object({
       sex: z.enum(["female", "male", "unspecified"]).default("unspecified"),
     })
     .default({ standard: "fda_dv", ageGroup: "unspecified", sex: "unspecified" }),
-  /** Optional calorie range (adults only; ignored for people under 19). */
-  energy: z
-    .object({
-      min: z.number().min(600).max(6000).nullable().default(null),
-      max: z.number().min(600).max(6000).nullable().default(null),
-    })
-    .nullable()
-    .default(null),
-  proteinMin: z.number().min(10).max(300).nullable().default(null),
+  /** Optional daily calorie and macro targets, hit within the tolerance (anyone may set them). */
   macroTargets: macroTargetsSchema.nullable().default(null),
-  mealShares: z.partialRecord(periodEnum, z.number().min(0.05).max(1)).optional(),
   focus: z.array(z.string().max(40)).max(8).default([]),
   preferences: dietaryPreferencesSchema.default({
     pattern: "none",
@@ -252,13 +302,12 @@ export interface PlanResult {
   universityId: string;
   date: string;
   strategy: StrategyKey;
-  goalMode: GoalMode;
   referenceLabel: string;
   meals: PlanMeal[];
   targets: TargetSummary[];
   coverage: CoverageRow[];
   energy: { value: number | null; low: number | null; high: number | null; min: number | null; max: number | null; shown: boolean };
-  /** Strict daily targets and how the plan compares, when they were used. */
+  /** Daily calorie and macro targets and how the plan compares, when any were set. */
   macroTargets?: MacroTargetRow[] | null;
   summary: string[];
   warnings: string[];

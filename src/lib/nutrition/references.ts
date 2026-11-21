@@ -215,20 +215,9 @@ export const DEFAULT_REFERENCE: ReferenceSelection = {
   sex: "unspecified",
 };
 
-/**
- * Users under 19 get balanced-nutrition suggestions only: no calorie or
- * macro targets are offered.
- */
+/** Under 19: the DRIs for ages 14–18 apply. */
 export function isMinorAgeGroup(age: AgeGroup): boolean {
   return age === "under_19";
-}
-
-/**
- * Calorie and protein goals are offered only to adults who chose an age
- * group of 19 or older. Under 19, or age not given, means no targets.
- */
-export function goalsAllowed(age: AgeGroup): boolean {
-  return age !== "under_19" && age !== "unspecified";
 }
 
 export function getReferenceProfile(sel: ReferenceSelection = DEFAULT_REFERENCE): ReferenceProfile {
@@ -292,7 +281,6 @@ export function getReferenceProfile(sel: ReferenceSelection = DEFAULT_REFERENCE)
     notes: [
       "RDAs cover the needs of nearly all healthy people in a group; AIs are used when evidence is not strong enough to set an RDA.",
       "These are long-term averages. Falling short on a single day is normal and is not a deficiency.",
-      ...(isMinor ? ["For people under 19 the app focuses on balanced, varied meals and does not offer calorie or macro targets."] : []),
       ...(sel.ageGroup === "unspecified" ? ["Age not specified: adult (19–30) values are shown."] : []),
     ],
   };

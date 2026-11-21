@@ -36,7 +36,7 @@ built to support more campuses.
 | Area | Routes | Highlights |
 |---|---|---|
 | Menus | `/menus`, `/foods/[id]` | Browse by date, dining market and meal. Every value shows where it came from (official, USDA matched, USDA recipe-derived, approximate, unknown), a confidence level and a range. Menus are labeled current, cached or unavailable. Each food shows bars for its 1–3 highest nutrients. |
-| Meal optimizer | `/optimizer` | A mixed-integer program picks dishes and servings across the meals you choose. Lock, replace, add and remove items, re-plan one meal or the rest of the day with a before/after preview, compare strategies, save or add to the diary. Works without an account. Adults can set strict calorie, protein, fat and carb targets. |
+| Meal optimizer | `/optimizer` | A mixed-integer program picks dishes and servings across the meals you choose. Lock, replace, add and remove items, re-plan one meal or the rest of the day with a before/after preview, compare strategies, save or add to the diary. Works without an account. Anyone can set daily calorie, protein, fat and carb targets that the plan hits within a chosen tolerance. |
 | Food diary | `/diary`, `/history` | Log menu items, USDA foods or custom foods. Edit servings, copy days, favorites, saved meals, planned vs eaten entries. Entries keep a snapshot of their nutrition. |
 | Dashboard | `/dashboard` | Today and the past week, with confidence labels and non-judgmental wording. |
 | Accounts | `/login`, `/signup`, `/settings` | Email and password (with verification and reset), optional Google sign-in, profile and preferences, data export, account deletion. |
@@ -132,10 +132,12 @@ The optimizer (`src/lib/optimizer/`) picks dishes and servings from the stored m
   variety, preferred foods).
 - **Uncertainty.** Goals use the conservative end of each estimate's range and limits use the pessimistic end, so
   uncertain data never inflates how well a plan does.
-- **Goal modes.** *Balanced day*, *Daily goals*, *Per-meal goals* and *Mixed*.
-- **Strict targets** (Daily goals, adults only). Enter protein, fat and carbohydrate grams; calories are always
-  `4 × protein + 9 × fat + 4 × carbs`, so the four numbers can never disagree. The plan must land within a ±3/5/10%
-  tolerance while being pulled toward exact. If the menus can't reach it, the result says how close it can get.
+- **One goal.** Every plan maximizes coverage of the day's vitamin, mineral, protein and fiber references; there are
+  no separate goal modes to choose from.
+- **Daily targets** (optional, for anyone). Set any of calories, protein, fat and carbs. They always agree with
+  `calories = 4 × protein + 9 × fat + 4 × carbs`: with three set, the fourth is calculated, and four set must add up
+  exactly. Each total must land within a ±3/5/10% tolerance while being pulled toward exact. If the menus can't reach
+  a target, the result says how close it can get. Signed-in users can save default targets in Settings.
 - **Editing.** Lock, exclude or replace items; ask for another option (a cut excludes every plan already shown);
   re-plan from a chosen meal onward with a before/after diff; compare strategies against the same baseline. Totals update
   instantly in the browser, and saving or adding to the diary sends only the selection — the server rebuilds the plan
@@ -143,7 +145,7 @@ The optimizer (`src/lib/optimizer/`) picks dishes and servings from the stored m
 - **Infeasibility.** When a request can't be met, the optimizer explains which requirements conflict and what to relax
   instead of returning an empty plan.
 
-No calorie targets are ever used for anyone under 19 or without an age group. Details:
+Targets are only ever numbers the person enters; the app never suggests a calorie deficit. Details:
 [docs/OPTIMIZER.md](docs/OPTIMIZER.md).
 
 ### 4. Diary and dashboard
@@ -326,8 +328,8 @@ the `CRON_SECRET` bearer token.
 - Never invent menus, availability, ingredients, serving sizes or nutrition. **Unknown is shown as unknown, never as
   zero.**
 - No allergen guarantees: labels and ingredient estimates can be wrong, and kitchens share equipment.
-- No diagnosing deficiencies, no scores or streaks, no mandatory weight, no automatic calorie deficits, and no calorie
-  targets for anyone under 19.
+- No diagnosing deficiencies, no scores or streaks, no mandatory weight, and no automatic calorie deficits: calorie
+  and macro targets are only ever numbers the person sets.
 - Collect the minimum: age range and sex are optional and only choose reference values.
 - Secrets stay on the server; every private record is protected by row-level security.
 - UW–Madison menus come from an **unofficial** copy of Nutrislice's public API and can stop at any time; the app labels
@@ -344,7 +346,7 @@ See [docs/LIMITATIONS.md](docs/LIMITATIONS.md) for the full list.
 - [USDA setup](docs/USDA_SETUP.md): datasets, rebuilding the index, licensing
 - [Menu data integration](docs/MENU_DATA_INTEGRATION.md): terms-of-use findings, turning the Nutrislice sync on (unofficial or authorized), staples, imports, file format
 - [Nutrition estimation](docs/NUTRITION_ESTIMATION.md): provenance, confidence, ranges ([validation results](docs/ESTIMATOR_VALIDATION.md))
-- [Optimizer](docs/OPTIMIZER.md): the model, objective, constraints, strict targets and editing features
+- [Optimizer](docs/OPTIMIZER.md): the model, objective, constraints, daily targets and editing features
 - [Deployment](docs/DEPLOYMENT.md): environment, database, cron, security checklist
 - [Limitations](docs/LIMITATIONS.md): what this app cannot know
 

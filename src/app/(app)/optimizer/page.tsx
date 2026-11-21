@@ -6,10 +6,9 @@ import type { OptimizerDefaults, OptimizerUniversity, PeriodAvailability, SavedP
 import { Skeleton } from "@/components/ui/skeleton";
 import { getSessionUser } from "@/lib/auth";
 import { defaultUniversity, getMenuView, listUniversities } from "@/lib/data/catalog";
-import { DEFAULT_DIETARY, getPlan, getProfile } from "@/lib/data/user";
+import { DEFAULT_DIETARY, getPlan, getProfile, NO_TARGETS } from "@/lib/data/user";
 import { addDays, formatTime, isIsoDate, todayIn } from "@/lib/dates";
 import { MEAL_PERIOD_LABELS } from "@/lib/menus/types";
-import { goalsAllowed } from "@/lib/nutrition/references";
 import { PLAN_PERIODS, planRequestSchema, type PlanResult } from "@/lib/optimizer/types";
 
 export const metadata: Metadata = {
@@ -110,13 +109,10 @@ async function OptimizerContent({ searchParams }: { searchParams: SearchParams }
   }));
 
   const ageGroup = profile?.ageGroup ?? "unspecified";
-  const adult = goalsAllowed(ageGroup);
   const defaults: OptimizerDefaults = {
     reference: { standard: profile?.referenceStandard ?? "fda_dv", ageGroup, sex: profile?.sex ?? "unspecified" },
     preferences: profile?.dietary ?? DEFAULT_DIETARY,
-    energyMin: adult ? (profile?.calorieGoal.min ?? null) : null,
-    energyMax: adult ? (profile?.calorieGoal.max ?? null) : null,
-    proteinMin: adult ? (profile?.proteinGoal ?? null) : null,
+    targets: profile?.targets ?? NO_TARGETS,
   };
 
   const uni: OptimizerUniversity = {
