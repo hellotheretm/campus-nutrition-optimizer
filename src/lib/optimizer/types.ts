@@ -8,6 +8,7 @@ import type { MealPeriod } from "@/db/schema";
 import { isIsoDate } from "@/lib/dates";
 import type { Confidence, NutrientEstimates } from "@/lib/nutrition/estimator";
 import type { NutrientId } from "@/lib/nutrition/nutrients";
+import { MEAL_PERIOD_LABELS } from "@/lib/menus/types";
 
 export const STRATEGIES = {
   balanced: {
@@ -42,6 +43,50 @@ export const PLAN_PERIODS = ["breakfast", "brunch", "lunch", "dinner", "late_nig
 export type PlanPeriod = (typeof PLAN_PERIODS)[number];
 
 const periodEnum = z.enum(PLAN_PERIODS);
+
+export const MEAL_CALORIE_MODES = ["flexible", "even", "custom"] as const;
+export type MealCalorieMode = (typeof MEAL_CALORIE_MODES)[number];
+export const MEAL_CALORIES_MIN = 50;
+export const MEAL_CALORIES_MAX = 5000;
+export const DIARY_MODES = ["all", "logged", "none"] as const;
+export type DiaryMode = (typeof DIARY_MODES)[number];
+
+/** Food already in the diary, added up (each nutrient a total with its range and confidence). */
+export interface DiaryBaseline {
+  mode: Exclude<DiaryMode, "none">;
+  entries: number;
+  nutrients: Partial<NutrientEstimates>;
+}
+
+/** Most meals one plan can hold (any mix of periods, e.g. two lunches). */
+export const MAX_MEALS = 8;
+
+/** Identifies a meal within a plan; a period name ("lunch") for the first meal of that period. */
+export const mealKeySchema = z.string().regex(/^[a-z0-9_-]{1,40}$/, "invalid meal key");
+
+/**
+ * Display names for a plan's meals: "Lunch", then "Lunch 2", "Lunch 3" for further meals of the same period.
+ * Pure, so the server and the browser name meals the same way.
+ */
+export function mealLabels(meals: { key: string; period: string }[]): Record<string, string> {
+  const seen = new Map<string, number>();
+  const out: Record<string, string> = {};
+  for (const m of meals) {
+    const n = (seen.get(m.period) ?? 0) + 1;
+    seen.set(m.period, n);
+    const base = MEAL_PERIOD_LABELS[m.period as MealPeriod] ?? m.period;
+    out[m.key] = n === 1 ? base : `${base} ${n}`;
+  }
+  return out;
+}
+
+/** A lock, exclusion or "fresh meal" names its meal by key; older saved requests named it by period. */
+const mealRef = { meal: mealKeySchema.optional(), period: periodEnum.optional() };
+const hasMeal = (v: { meal?: string; period?: string }) => Boolean(v.meal ?? v.period);
+function toMeal<V extends { meal?: string; period?: string }>(v: V): Omit<V, "meal" | "period"> & { meal: string } {
+  const { meal, period, ...rest } = v;
+  return { ...rest, meal: (meal ?? period) as string };
+}
 const shortList = (max: number, len = 80) => z.array(z.string().trim().min(1).max(len)).max(max);
 
 export const dietaryPreferencesSchema = z.object({
@@ -180,14 +225,29 @@ export const planRequestSchema = z.object({
   date: z.string().refine(isIsoDate, "invalid date"),
   meals: z
     .array(
-      z.object({
-        period: periodEnum,
-        /** Empty means every location that serves this meal. */
-        locationIds: z.array(z.string().min(1).max(200)).max(20).default([]),
-      }),
+      z
+        .object({
+          /** Defaults to the period, so a plan with one meal per period needs no keys. */
+          key: mealKeySchema.optional(),
+          period: periodEnum,
+          /** Empty means every location that serves this meal. */
+          locationIds: z.array(z.string().min(1).max(200)).max(20).default([]),
+          /** Calories for this meal when mealCalories is "custom" (blank meals share what's left). */
+          calories: z.number().min(MEAL_CALORIES_MIN).max(MEAL_CALORIES_MAX).nullable().default(null),
+        })
+        .transform((m) => ({ ...m, key: m.key ?? m.period })),
     )
     .min(1)
-    .max(5),
+    .max(MAX_MEALS)
+    .refine((ms) => new Set(ms.map((m) => m.key)).size === ms.length, "Each meal needs its own key."),
+  /**
+   * How the calories left for the day (daily target minus the diary) are spread over the meals:
+   * any way that hits the day (flexible), the same for every meal (even), or per meal (custom).
+   * Only used when there is a calorie target.
+   */
+  mealCalories: z.enum(MEAL_CALORIE_MODES).default("flexible"),
+  /** Which diary entries for the date count toward the day's totals (signed-in users only). */
+  diary: z.enum(DIARY_MODES).default("all"),
   strategy: z.enum(STRATEGY_KEYS as [StrategyKey, ...StrategyKey[]]).default("balanced"),
   reference: z
     .object({
@@ -212,16 +272,19 @@ export const planRequestSchema = z.object({
   maxItemsPerMeal: z.number().int().min(1).max(MAX_ITEMS_NO_LIMIT).default(4),
   maxServingsPerItem: z.number().min(1).max(3).default(2),
   locks: z
-    .array(z.object({ period: periodEnum, foodId: z.string().min(1).max(100), servings: z.number().min(0.5).max(6) }))
-    .max(40)
+    .array(z.object({ ...mealRef, foodId: z.string().min(1).max(100), servings: z.number().min(0.5).max(6) }).refine(hasMeal, "meal is required").transform(toMeal))
+    .max(80)
     .default([]),
-  excluded: z.array(z.object({ period: periodEnum, foodId: z.string().min(1).max(100) })).max(300).default([]),
+  excluded: z
+    .array(z.object({ ...mealRef, foodId: z.string().min(1).max(100) }).refine(hasMeal, "meal is required").transform(toMeal))
+    .max(300)
+    .default([]),
   /** Signatures of plans already shown, so "another option" returns something different. */
   avoidSignatures: z.array(z.string().max(4000)).max(10).default([]),
   /** Meals whose current items must not be repeated exactly (used by "regenerate this meal"). */
   freshMeals: z
-    .array(z.object({ period: periodEnum, foodIds: z.array(z.string().max(100)).max(MAX_ITEMS_NO_LIMIT) }))
-    .max(5)
+    .array(z.object({ ...mealRef, foodIds: z.array(z.string().max(100)).max(MAX_ITEMS_NO_LIMIT) }).refine(hasMeal, "meal is required").transform(toMeal))
+    .max(MAX_MEALS)
     .default([]),
 });
 
@@ -253,6 +316,10 @@ export interface PlanItem {
 }
 
 export interface PlanMeal {
+  /** Identifies the meal within the plan (see mealKeySchema). */
+  key: string;
+  /** "Lunch", "Lunch 2"… */
+  label: string;
   period: MealPeriod;
   status: "planned" | "unavailable";
   locationId: string | null;
@@ -261,6 +328,8 @@ export interface PlanMeal {
   note: string | null;
   /** Items considered for this meal after filters. */
   candidates: number;
+  /** This meal's share of the day's calories, when the calories are split by meal. */
+  energyTarget?: { target: number; min: number; max: number } | null;
 }
 
 /** A menu item offered in the manual "choose from the menu" picker. */
@@ -317,8 +386,10 @@ export interface PlanResult {
   targets: TargetSummary[];
   coverage: CoverageRow[];
   energy: { value: number | null; low: number | null; high: number | null; min: number | null; max: number | null; shown: boolean };
-  /** Daily calorie and macro targets and how the plan compares, when any were set. */
+  /** Daily calorie and macro targets and how the plan compares (diary included), when any were set. */
   macroTargets?: MacroTargetRow[] | null;
+  /** Food already in the diary for this date that the totals include, or null when none is counted. */
+  diary?: DiaryBaseline | null;
   summary: string[];
   warnings: string[];
   infeasibility: { reasons: string[]; suggestions: string[] } | null;

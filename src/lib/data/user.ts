@@ -26,10 +26,11 @@ import { nutrientsForUsdaFood } from "@/lib/nutrition/estimator";
 import { perServingNutrients } from "@/lib/nutrition/food-nutrients";
 import { isNutrientId, type NutrientId } from "@/lib/nutrition/nutrients";
 import type { AgeGroup, ReferenceSex, ReferenceStandard } from "@/lib/nutrition/references";
-import { compactEstimates, scaleEstimates } from "@/lib/nutrition/totals";
+import { compactEstimates, scaleEstimates, sumNutrients } from "@/lib/nutrition/totals";
 import { getUsdaFood } from "@/lib/nutrition/usda-index";
 import { servingLabel } from "@/lib/nutrition/units";
-import { resolveMacroTargets, type MacroTargetsInput, type PlanRequest, type PlanResult } from "@/lib/optimizer/types";
+import { baselineFromTotals } from "@/lib/optimizer/coverage";
+import { resolveMacroTargets, type DiaryBaseline, type DiaryMode, type MacroTargetsInput, type PlanRequest, type PlanResult } from "@/lib/optimizer/types";
 
 /* ------------------------------------------------------------------ */
 /* Profile                                                            */
@@ -275,6 +276,18 @@ export async function listDiary(userId: string, from: string, to: string): Promi
       .where(and(eq(diaryEntries.userId, userId), gte(diaryEntries.date, from), lte(diaryEntries.date, to)))
       .orderBy(asc(diaryEntries.date), asc(diaryEntries.createdAt)),
   );
+}
+
+/**
+ * Food already in the user's diary for a date, added up, for the optimizer to plan around.
+ * "all" counts planned and eaten entries, "logged" only eaten ones. Null when nothing counts.
+ */
+export async function diaryBaseline(userId: string, date: string, mode: DiaryMode): Promise<DiaryBaseline | null> {
+  if (mode === "none" || !isIsoDate(date)) return null;
+  const rows = (await listDiary(userId, date, date)).filter((r) => mode === "all" || r.status === "logged");
+  if (!rows.length) return null;
+  const nutrients = baselineFromTotals(sumNutrients(rows.map((r) => ({ nutrients: r.nutrients, factor: 1 }))));
+  return { mode, entries: rows.length, nutrients };
 }
 
 export async function addDiaryEntry(userId: string, raw: unknown): Promise<DiaryEntry> {

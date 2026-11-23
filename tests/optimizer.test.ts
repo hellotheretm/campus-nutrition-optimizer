@@ -5,8 +5,8 @@ import type { NutrientId } from "@/lib/nutrition/nutrients";
 import { computeCoverage, planLines } from "@/lib/optimizer/coverage";
 import { checkFood, termMatches } from "@/lib/optimizer/filters";
 import { optimize, planSignature, type Candidate, type MealCandidates } from "@/lib/optimizer/model";
-import { buildTargets } from "@/lib/optimizer/targets";
-import { planRequestSchema, resolveMacroTargets, type PlanRequestInput } from "@/lib/optimizer/types";
+import { allotMealCalories, buildTargets } from "@/lib/optimizer/targets";
+import { mealLabels, planRequestSchema, resolveMacroTargets, type DiaryBaseline, type PlanRequestInput } from "@/lib/optimizer/types";
 
 const prefs = (p: Partial<PlanRequestInput["preferences"]> = {}) => planRequestSchema.parse({ universityId: "u", date: "2026-11-20", meals: [{ period: "lunch" }], preferences: p }).preferences;
 
@@ -71,11 +71,12 @@ function cand(foodId: string, period: MealPeriod, locationId: string, n: Partial
     preferred: false,
     plant: false,
     ...extra,
+    mealKey: extra.mealKey ?? period,
   };
 }
 
-function meal(period: MealPeriod, candidates: Candidate[]): MealCandidates {
-  return { period, candidates, unavailableNote: null, filteredOut: 0, filterSummary: [] };
+function meal(period: MealPeriod, candidates: Candidate[], key: string = period, label?: string): MealCandidates {
+  return { key, label: label ?? key, period, candidates, unavailableNote: null, filteredOut: 0, filterSummary: [] };
 }
 
 const BASIC = { energy: 400, protein: 15, carbohydrate: 50, fat: 12, fiber: 4, sodium: 500, iron: 2, calcium: 100, vitamin_c: 10 };
@@ -91,10 +92,10 @@ function lunchMenu(): Candidate[] {
   ];
 }
 
-async function run(input: Partial<PlanRequestInput>, meals: MealCandidates[]) {
-  const req = planRequestSchema.parse({ universityId: "u", date: "2026-11-20", meals: meals.map((m) => ({ period: m.period })), ...input });
-  const targets = buildTargets(req, meals.map((m) => m.period));
-  return { req, targets, plan: await optimize(req, meals, targets) };
+async function run(input: Partial<PlanRequestInput>, meals: MealCandidates[], diary: DiaryBaseline | null = null) {
+  const req = planRequestSchema.parse({ universityId: "u", date: "2026-11-20", meals: meals.map((m) => ({ key: m.key, period: m.period })), ...input });
+  const targets = buildTargets(req, diary);
+  return { req, targets, plan: await optimize(req, meals, targets, diary) };
 }
 
 describe("meal optimizer", () => {
@@ -215,7 +216,7 @@ describe("calorie and macro targets", () => {
 
   it("derives calories from protein, fat and carbs", () => {
     const req = parse({ protein: 90, fat: 40, carbohydrate: 120, tolerancePct: 5 });
-    const t = buildTargets(req.data!, ["lunch"]);
+    const t = buildTargets(req.data!);
     expect(t.macros?.targets.energy).toBe(4 * 90 + 9 * 40 + 4 * 120);
     expect(t.amdr).toBe(false);
   });
@@ -276,6 +277,93 @@ describe("calorie and macro targets", () => {
       expect(targets.macros?.targets.energy).toBe(4 * 90 + 9 * 40 + 4 * 120);
       expect(plan.macroTargets).toHaveLength(4);
       expect(plan.energy.shown).toBe(true);
+    }
+  });
+});
+
+describe("diary, per-meal calories and extra meals", () => {
+  const adult = { standard: "dri" as const, ageGroup: "19_30" as const, sex: "unspecified" as const };
+  const item = (id: string, period: MealPeriod, p: number, f: number, c: number, extra: Partial<Record<NutrientId, number>> = {}) =>
+    cand(id, period, "A", { energy: 4 * p + 9 * f + 4 * c, protein: p, fat: f, carbohydrate: c, ...extra });
+  const menu = (period: MealPeriod) => [
+    item(period + "-chicken", period, 31, 4, 0, { iron: 1 }),
+    item(period + "-rice", period, 4, 0.5, 45, { fiber: 1 }),
+    item(period + "-nuts", period, 6, 14, 6, { fiber: 3 }),
+    item(period + "-fruit", period, 1, 0, 25, { vitamin_c: 50, fiber: 3 }),
+    item(period + "-yogurt", period, 17, 0, 6, { calcium: 190 }),
+    item(period + "-pasta", period, 8, 2, 43, { fiber: 2 }),
+  ];
+  const opts = { reference: adult, maxItemsPerMeal: 8, maxServingsPerItem: 3 };
+  const kcal = (m: Parameters<typeof planLines>[0][number]) => planLines([m]).reduce((t, l) => t + (l.nutrients.energy?.value ?? 0) * l.servings, 0);
+  const diary = (energy: number, protein: number, fat: number, carbohydrate: number): DiaryBaseline => ({
+    mode: "all",
+    entries: 2,
+    nutrients: { energy: est(energy), protein: est(protein), fat: est(fat), carbohydrate: est(carbohydrate) },
+  });
+
+  it("labels repeated periods as Lunch, Lunch 2", () => {
+    expect(mealLabels([{ key: "lunch", period: "lunch" }, { key: "lunch-2", period: "lunch" }, { key: "dinner", period: "dinner" }])).toEqual({
+      lunch: "Lunch",
+      "lunch-2": "Lunch 2",
+      dinner: "Dinner",
+    });
+  });
+
+  it("rejects two meals with the same key, and accepts legacy period locks", () => {
+    const base = { universityId: "u", date: "2026-11-20" };
+    expect(planRequestSchema.safeParse({ ...base, meals: [{ period: "lunch" }, { period: "lunch" }] }).success).toBe(false);
+    const ok = planRequestSchema.parse({ ...base, meals: [{ period: "lunch" }, { key: "lunch-2", period: "lunch" }], locks: [{ period: "lunch", foodId: "x", servings: 1 }] });
+    expect(ok.meals.map((m) => m.key)).toEqual(["lunch", "lunch-2"]);
+    expect(ok.locks[0].meal).toBe("lunch");
+  });
+
+  it("splits calories evenly or by custom amounts, and explains totals that don't fit", () => {
+    const meals = [
+      { key: "breakfast", calories: null },
+      { key: "lunch", calories: 700 },
+      { key: "dinner", calories: null },
+    ];
+    expect(allotMealCalories("even", 1500, meals, 0.05).targets).toEqual({ breakfast: 500, lunch: 500, dinner: 500 });
+    expect(allotMealCalories("custom", 1500, meals, 0.05).targets).toEqual({ breakfast: 400, lunch: 700, dinner: 400 });
+    expect(allotMealCalories("custom", 700, meals, 0.05).error).toMatch(/leaving/);
+    expect(allotMealCalories("custom", 1500, meals.map((m) => ({ ...m, calories: 300 })), 0.05).error).toMatch(/add up/);
+    expect(allotMealCalories("even", 0, meals, 0.05).error).toMatch(/no calories left/);
+    expect(allotMealCalories("flexible", 1500, meals, 0.05)).toEqual({ targets: {}, error: null });
+  });
+
+  it("counts diary food toward the day's calorie and macro targets", async () => {
+    const macroTargets = { protein: 90, fat: 45, carbohydrate: 200, tolerancePct: 10 as const };
+    const { plan } = await run({ ...opts, macroTargets }, [meal("lunch", menu("lunch"))], diary(800, 45, 22, 100));
+    expect(plan.infeasibility?.reasons ?? []).toEqual([]);
+    expect(plan.status).not.toBe("infeasible");
+    expect(plan.diary?.entries).toBe(2);
+    const energy = plan.macroTargets!.find((r) => r.id === "energy")!;
+    // The row is the whole day, diary included, so it lands in the band...
+    expect(energy.value!).toBeGreaterThanOrEqual(energy.min - 1e-6);
+    expect(energy.value!).toBeLessThanOrEqual(energy.max + 1e-6);
+    // ...while the planned food alone is only about what was left (1,565 − 800 kcal).
+    expect(kcal(plan.meals[0])).toBeLessThan(900);
+  });
+
+  it("explains when the diary already meets the calorie target", async () => {
+    const { plan } = await run(
+      { ...opts, macroTargets: { energy: 1600, tolerancePct: 5 }, mealCalories: "even" },
+      [meal("lunch", menu("lunch"))],
+      diary(1700, 60, 60, 200),
+    );
+    expect(plan.status).toBe("infeasible");
+    expect(plan.infeasibility!.reasons.join(" ")).toMatch(/diary/i);
+  });
+
+  it("keeps each meal near its share of the calories left, including an extra lunch", async () => {
+    const meals = [meal("lunch", menu("lunch"), "lunch", "Lunch"), meal("lunch", menu("lunch").map((c) => ({ ...c, mealKey: "lunch-2" })), "lunch-2", "Lunch 2")];
+    const { plan } = await run({ ...opts, macroTargets: { energy: 1400, tolerancePct: 10 }, mealCalories: "even" }, meals, diary(400, 20, 10, 50));
+    expect(plan.status).not.toBe("infeasible");
+    expect(plan.meals.map((m) => m.label)).toEqual(["Lunch", "Lunch 2"]);
+    for (const m of plan.meals) {
+      expect(m.energyTarget?.target).toBeCloseTo(500, 0);
+      expect(kcal(m)).toBeGreaterThanOrEqual(m.energyTarget!.min - 1e-6);
+      expect(kcal(m)).toBeLessThanOrEqual(m.energyTarget!.max + 1e-6);
     }
   });
 });

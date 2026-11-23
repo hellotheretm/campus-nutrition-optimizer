@@ -16,7 +16,8 @@
  * + Σ_UL      10,000 · slack / UL               upper limits are hard; the slack only exists
  *                                               to explain infeasibility
  * + calorie and macro target deviations (when set: a hard ±tolerance band plus a pull toward
- *   exact), or, without targets, small penalties for macro energy outside the AMDR
+ *   exact; with calories split by meal, the same for each meal's share), or, without targets,
+ *   small penalties for macro energy outside the AMDR
  * + 0.3 per repeated dish across meals (variety)
  * + 5 per extra item of the same kind in one meal (two milks, two pastas; see similar.ts)
  * + small per-item and per-serving costs, plus 0.2 per serving beyond the first of any
@@ -26,18 +27,22 @@
  * pulled toward its low end (medium 15%, low 35%), for limits toward its
  * high end, and upper limits use the high end. Unknown values count as zero
  * contribution to goals (they are never assumed to help) and are reported.
+ *
+ * Food already in the diary for the date is a fixed starting amount: goals ask only for what's
+ * left, limits and upper limits leave room for it, and calorie and macro targets are for the day.
  */
 import type { MealPeriod } from "@/db/schema";
 import type { Confidence, NutrientEstimates } from "@/lib/nutrition/estimator";
 import { NUTRIENTS, type NutrientId } from "@/lib/nutrition/nutrients";
 import { LpModel, solveModel } from "@/lib/solver/lp";
-import { computeCoverage, conservativeValue, energyTotal, explainItems, pessimisticValue, planLines, upperValue } from "./coverage";
+import { computeCoverage, conservativeValue, dayLines, energyTotal, explainItems, pessimisticValue, upperValue } from "./coverage";
 import { similarGroups } from "./similar";
-import { nutrientName, type MacroSpec, type Targets } from "./targets";
+import { allotMealCalories, nutrientName, type MacroSpec, type Targets } from "./targets";
 import {
   MACRO_IDS,
   STRATEGIES,
   type CoverageRow,
+  type DiaryBaseline,
   type MacroId,
   type MacroTargetRow,
   type PlanItem,
@@ -52,6 +57,8 @@ export interface Candidate {
   name: string;
   station: string | null;
   period: MealPeriod;
+  /** The meal this candidate belongs to (the same dish can be a candidate for two meals). */
+  mealKey: string;
   locationId: string;
   locationName: string;
   servingLabel: string;
@@ -69,6 +76,8 @@ export interface Candidate {
 }
 
 export interface MealCandidates {
+  key: string;
+  label: string;
   period: MealPeriod;
   candidates: Candidate[];
   /** Why the meal cannot be planned (closed, no menu, everything filtered out). */
@@ -91,9 +100,9 @@ const GOAL_PIECES: [number, number][] = [
   [0.5, 3.0],
 ];
 
-export function planSignature(meals: { period: string; items: { foodId: string }[] }[]): string {
+export function planSignature(meals: { key?: string; period: string; items: { foodId: string }[] }[]): string {
   return meals
-    .flatMap((m) => m.items.map((i) => `${m.period}:${i.foodId}`))
+    .flatMap((m) => m.items.map((i) => `${m.key ?? m.period}:${i.foodId}`))
     .sort()
     .join("|");
 }
@@ -116,7 +125,7 @@ function prune(meal: MealCandidates, targets: Targets, keep: Set<string>): Candi
   const out: Candidate[] = [];
   const seen = new Set<string>();
   for (const { c } of scored) {
-    if (keep.has(`${c.period}:${c.foodId}`) && !seen.has(c.foodId)) {
+    if (keep.has(`${c.mealKey}:${c.foodId}`) && !seen.has(c.foodId)) {
       out.push(c);
       seen.add(c.foodId);
     }
@@ -134,6 +143,11 @@ function prune(meal: MealCandidates, targets: Targets, keep: Set<string>): Candi
     seen.add(c.foodId);
   }
   return out;
+}
+
+/** The ±tolerance band around a target. */
+function band(target: number, tolerance: number): { min: number; max: number } {
+  return { min: target * (1 - tolerance), max: target * (1 + tolerance) };
 }
 
 function pct(n: number): string {
@@ -155,7 +169,7 @@ interface VarRef {
   mealIndex: number;
 }
 
-export async function optimize(req: PlanRequest, meals: MealCandidates[], targets: Targets): Promise<PlanResult> {
+export async function optimize(req: PlanRequest, meals: MealCandidates[], targets: Targets, diary: DiaryBaseline | null = null): Promise<PlanResult> {
   const warnings: string[] = [];
   const reasons: string[] = [];
   const suggestions: string[] = [];
@@ -165,8 +179,8 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
   const servingCost = 0.015;
   const extraServingCost = 0.2;
 
-  const lockKey = (period: string, foodId: string) => `${period}:${foodId}`;
-  const locks = new Map(req.locks.map((l) => [lockKey(l.period, l.foodId), l.servings]));
+  const lockKey = (mealKey: string, foodId: string) => `${mealKey}:${foodId}`;
+  const locks = new Map(req.locks.map((l) => [lockKey(l.meal, l.foodId), l.servings]));
 
   const model = new LpModel("min");
   const refs: VarRef[] = [];
@@ -177,7 +191,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
   const mealHasVars: boolean[] = [];
 
   for (const [mi, meal] of meals.entries()) {
-    const keep = new Set([...locks.keys()].filter((k) => k.startsWith(`${meal.period}:`)));
+    const keep = new Set([...locks.keys()].filter((k) => k.startsWith(`${meal.key}:`)));
     const cands = prune(meal, targets, keep);
     if (!cands.length) {
       mealHasVars.push(false);
@@ -189,7 +203,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     // Locks only conflict when no single location serves every locked food.
     const lockedFoods = new Map<string, Set<string>>();
     for (const c of cands) {
-      if (!locks.has(lockKey(c.period, c.foodId))) continue;
+      if (!locks.has(lockKey(c.mealKey, c.foodId))) continue;
       const set = lockedFoods.get(c.foodId) ?? new Set<string>();
       set.add(c.locationId);
       lockedFoods.set(c.foodId, set);
@@ -198,8 +212,8 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
       ? [...lockedFoods.values()].reduce((acc, locs) => new Set([...acc].filter((l) => locs.has(l))))
       : null;
     if (shared && shared.size === 0) {
-      reasons.push(`Your locked ${meal.period} items aren't all served at the same dining location, and a meal is planned at one location.`);
-      suggestions.push(`Unlock one of the ${meal.period} items, or move it to another meal.`);
+      reasons.push(`Your locked ${meal.label.toLowerCase()} items aren't all served at the same dining location, and a meal is planned at one location.`);
+      suggestions.push(`Unlock one of the ${meal.label.toLowerCase()} items, or move it to another meal.`);
     }
     const lockChoice = new Map<string, string[]>();
 
@@ -214,7 +228,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     let lockedServings = 0;
     for (const c of cands) {
       const j = refs.length;
-      const lockServings = locks.get(lockKey(c.period, c.foodId)) ?? null;
+      const lockServings = locks.get(lockKey(c.mealKey, c.foodId)) ?? null;
       const step = lockServings !== null && !Number.isInteger(lockServings / c.step) ? 0.5 : c.step;
       const maxServings = Math.max(req.maxServingsPerItem, lockServings ?? 0);
       const maxSteps = Math.round(maxServings / step);
@@ -255,7 +269,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     for (const [k, [foodId, ys]] of [...lockChoice.entries()].entries()) {
       model.addConstraint(`lock_${mi}_${k}`, ys.map((v) => [v, 1] as const), "=", 1);
       lockedItems++;
-      lockedServings += locks.get(lockKey(meal.period, foodId)) ?? 0;
+      lockedServings += locks.get(lockKey(meal.key, foodId)) ?? 0;
     }
     const mealRefs = refs.filter((r) => r.mealIndex === mi);
     const itemCap = Math.max(maxItems, lockedItems);
@@ -280,7 +294,9 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     ]);
   }
 
-  const inScope = (r: VarRef, scope: string) => scope === "day" || meals[r.mealIndex].period === scope;
+  const inScope = (r: VarRef, scope: string) => scope === "day" || meals[r.mealIndex].key === scope;
+  // Food already in the diary: a fixed amount every day-level total starts from.
+  const base = (id: NutrientId, f: (e: NutrientEstimates[NutrientId] | undefined) => number) => (diary ? f(diary.nutrients[id]) : 0);
 
   // Goals with diminishing returns.
   for (const [gi, g] of targets.goals.entries()) {
@@ -292,12 +308,15 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
       const a = (conservativeValue(r.c.nutrients[g.id]) * r.c.step) / g.target;
       if (a > 1e-9) terms.push([r.n, a]);
     }
+    // What the diary already covers (counted conservatively) is not asked of the plan again.
+    const need = 1 - (g.scope === "day" ? base(g.id, conservativeValue) / g.target : 0);
+    if (need <= 1e-9) continue;
     const pieces = GOAL_PIECES.map(([size, mult], k) => {
       const v = model.addVar(`s_${gi}_${k}`, { lb: 0, ub: size });
       model.addObjective(v, g.weight * mult);
       return v;
     });
-    model.addConstraint(`goal_${gi}`, [...terms, ...pieces.map((p) => [p, 1] as [string, number])], ">=", 1);
+    model.addConstraint(`goal_${gi}`, [...terms, ...pieces.map((p) => [p, 1] as [string, number])], ">=", need);
   }
 
   // Soft limits.
@@ -315,11 +334,11 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     const e2 = model.addVar(`e_${li}_1`, { lb: 0 });
     model.addObjective(e1, l.weight * 1);
     model.addObjective(e2, l.weight * 3);
-    model.addConstraint(`limit_${li}`, [...terms, [e1, -1], [e2, -1]], "<=", 1);
+    model.addConstraint(`limit_${li}`, [...terms, [e1, -1], [e2, -1]], "<=", 1 - base(l.id, pessimisticValue) / l.limit);
   }
 
   // Upper limits (hard; slack only to diagnose).
-  const ulSlacks: { v: string; id: NutrientId; amount: number }[] = [];
+  const ulSlacks: { v: string; id: NutrientId; amount: number; diaryOver: boolean }[] = [];
   for (const [ui, u] of targets.uls.entries()) {
     const terms: [string, number][] = [];
     for (const r of refs) {
@@ -329,8 +348,9 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     if (!terms.length) continue;
     const slack = model.addVar(`ul_${ui}`, { lb: 0 });
     model.addObjective(slack, UL_PENALTY / u.amount);
-    model.addConstraint(`ulc_${ui}`, [...terms, [slack, -1]], "<=", u.amount);
-    ulSlacks.push({ v: slack, id: u.id, amount: u.amount });
+    const fromDiary = base(u.compare, upperValue);
+    model.addConstraint(`ulc_${ui}`, [...terms, [slack, -1]], "<=", u.amount - fromDiary);
+    ulSlacks.push({ v: slack, id: u.id, amount: u.amount, diaryOver: fromDiary > u.amount });
   }
 
   // Macronutrient distribution (AMDR) when no calorie or macro targets are set: day level, in kcal.
@@ -350,8 +370,11 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
       model.addObjective(below, 0.005);
       model.addObjective(above, 0.005);
       const scaleE = (f: number) => energyTerms.map(([v, c]) => [v, -c * f] as [string, number]);
-      model.addConstraint(`amdrlo_${id}`, [...macro(id, kcal), ...scaleE(lo / 100), [below, 1]], ">=", 0);
-      model.addConstraint(`amdrhi_${id}`, [...macro(id, kcal), ...scaleE(hi / 100), [above, -1]], "<=", 0);
+      // The diary's macro energy and calories count toward the day's distribution too.
+      const macroBase = base(id, (e) => e?.value ?? 0) * kcal;
+      const energyBase = base("energy", (e) => e?.value ?? 0);
+      model.addConstraint(`amdrlo_${id}`, [...macro(id, kcal), ...scaleE(lo / 100), [below, 1]], ">=", (energyBase * lo) / 100 - macroBase);
+      model.addConstraint(`amdrhi_${id}`, [...macro(id, kcal), ...scaleE(hi / 100), [above, -1]], "<=", (energyBase * hi) / 100 - macroBase);
     }
   }
 
@@ -370,7 +393,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
       const over = model.addVar(`mo_${id}`, { lb: 0 });
       model.addObjective(under, MACRO_EXACT_WEIGHT / target);
       model.addObjective(over, MACRO_EXACT_WEIGHT / target);
-      model.addConstraint(`mx_${id}`, [...terms, [under, 1], [over, -1]], "=", target);
+      model.addConstraint(`mx_${id}`, [...terms, [under, 1], [over, -1]], "=", target - base(id, (e) => e?.value ?? 0));
       const bandUnder = model.addVar(`mbu_${id}`, { lb: 0 });
       const bandOver = model.addVar(`mbo_${id}`, { lb: 0 });
       model.addObjective(bandUnder, MACRO_BAND_PENALTY / target);
@@ -384,6 +407,53 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
       warnings.push(
         `${macroSkipped} menu ${one ? "item" : "items"} without published or estimated values for your targets ${one ? "was" : "were"} left out, because ${one ? "it" : "they"} can't be counted toward them.`,
       );
+    }
+  }
+
+  // Calories split by meal: each meal's total must land within ±tolerance of its share of
+  // what's left for the day (day target minus the diary), pulled toward exact like the day target.
+  const mealEnergy = new Map<number, number>();
+  const mealSlacks: { v: string; mi: number }[] = [];
+  const dayEnergy = targets.macros?.targets.energy;
+  const diaryEnergy = base("energy", (e) => e?.value ?? 0);
+  if (targets.macros && dayEnergy !== undefined && diaryEnergy >= dayEnergy) {
+    const fmt = (v: number) => `${Math.round(v).toLocaleString("en-US")} kcal`;
+    reasons.push(`Your diary already has ${fmt(diaryEnergy)} for this day, at or above your ${fmt(dayEnergy)} calorie target, so there are no calories left to plan.`);
+    suggestions.push("Plan another day, or don't count the diary for this plan.");
+  } else if (targets.macros && dayEnergy !== undefined && req.mealCalories !== "flexible") {
+    const open = meals.map((m, i) => ({ m, i, req: req.meals.find((x) => x.key === m.key) })).filter((x) => mealHasVars[x.i]);
+    const left = dayEnergy - diaryEnergy;
+    const allot = allotMealCalories(
+      req.mealCalories,
+      left,
+      open.map((x) => ({ key: x.m.key, calories: x.req?.calories ?? null })),
+      targets.macros.tolerance,
+    );
+    if (allot.error) {
+      reasons.push(allot.error);
+      suggestions.push("Change the meal calories, or let calories split flexibly between meals.");
+    } else {
+      for (const { m, i } of open) {
+        const t = allot.targets[m.key];
+        if (!(t > 0)) continue;
+        mealEnergy.set(i, t);
+        const terms = refs
+          .filter((r) => r.mealIndex === i)
+          .map((r) => [r.n, (r.c.nutrients.energy?.value ?? 0) * r.c.step] as [string, number])
+          .filter(([, v]) => v > 0);
+        const under = model.addVar(`meu_${i}`, { lb: 0 });
+        const over = model.addVar(`meo_${i}`, { lb: 0 });
+        model.addObjective(under, MACRO_EXACT_WEIGHT / t);
+        model.addObjective(over, MACRO_EXACT_WEIGHT / t);
+        model.addConstraint(`mex_${i}`, [...terms, [under, 1], [over, -1]], "=", t);
+        const bandUnder = model.addVar(`mebu_${i}`, { lb: 0 });
+        const bandOver = model.addVar(`mebo_${i}`, { lb: 0 });
+        model.addObjective(bandUnder, MACRO_BAND_PENALTY / t);
+        model.addObjective(bandOver, MACRO_BAND_PENALTY / t);
+        model.addConstraint(`mebuc_${i}`, [[under, 1], [bandUnder, -1]], "<=", t * targets.macros.tolerance);
+        model.addConstraint(`meboc_${i}`, [[over, 1], [bandOver, -1]], "<=", t * targets.macros.tolerance);
+        mealSlacks.push({ v: bandUnder, mi: i }, { v: bandOver, mi: i });
+      }
     }
   }
 
@@ -407,7 +477,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
   // "Show me something different": exclude plans already shown and exact repeats of regenerated meals.
   const refsByKey = new Map<string, VarRef[]>();
   for (const r of refs) {
-    const k = `${r.c.period}:${r.c.foodId}`;
+    const k = `${r.c.mealKey}:${r.c.foodId}`;
     refsByKey.set(k, [...(refsByKey.get(k) ?? []), r]);
   }
   // A shown plan may not repeat exactly; a regenerated meal must swap at least half of its unlocked items.
@@ -417,7 +487,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
       const keys = sig.split("|").filter(Boolean);
       return { keys, max: keys.length - 1 };
     }),
-    ...req.freshMeals.map((f) => ({ keys: f.foodIds.map((id) => `${f.period}:${id}`), max: Math.floor(f.foodIds.length / 2) })),
+    ...req.freshMeals.map((f) => ({ keys: f.foodIds.map((id) => `${f.meal}:${id}`), max: Math.floor(f.foodIds.length / 2) })),
   ];
   cuts.forEach(({ keys, max }, ci) => {
     const vars = keys.flatMap((k) => refsByKey.get(k) ?? []);
@@ -446,6 +516,8 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
   const planMeals: PlanMeal[] = meals.map((m, mi) => {
     if (mealUnavailable[mi]) {
       return {
+        key: m.key,
+        label: m.label,
         period: m.period,
         status: "unavailable",
         locationId: null,
@@ -453,6 +525,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
         items: [],
         note: m.unavailableNote ?? "No menu items are available for this meal.",
         candidates: 0,
+        energyTarget: null,
       };
     }
     const chosen = refs.filter((r) => r.mealIndex === mi && Math.round(solved.values.get(r.n) ?? 0) > 0);
@@ -474,7 +547,10 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
       why: [],
     }));
     const loc = chosen[0]?.c;
+    const et = mealEnergy.get(mi);
     return {
+      key: m.key,
+      label: m.label,
       period: m.period,
       status: "planned",
       locationId: loc?.locationId ?? null,
@@ -482,10 +558,11 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
       items,
       note: null,
       candidates: m.candidates.length,
+      energyTarget: et !== undefined && targets.macros ? { target: et, ...band(et, targets.macros.tolerance) } : null,
     };
   });
 
-  const lines = planLines(planMeals);
+  const lines = dayLines(planMeals, diary);
   const coverage = computeCoverage(lines, targets.summary);
 
   explainItems(planMeals, targets.summary);
@@ -498,16 +575,17 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     status = "infeasible";
     const lockedOnly = planMeals.every((m) => m.items.every((i) => i.locked));
     infeasibility = {
-      reasons: over.map(
-        (o) =>
-          `${lockedOnly ? "Your locked items" : "Every plan the menus allow"} would exceed the upper limit for ${nutrientName(o.id)} (${fmtAmount(o.id, o.amount)}) at the high end of the estimates.`,
+      reasons: over.map((o) =>
+        o.diaryOver
+          ? `Food already in your diary is above the upper limit for ${nutrientName(o.id)} (${fmtAmount(o.id, o.amount)}) at the high end of the estimates.`
+          : `${lockedOnly ? "Your locked items" : "Every plan the menus allow"} would exceed the upper limit for ${nutrientName(o.id)} (${fmtAmount(o.id, o.amount)}) at the high end of the estimates${diary ? ", counting your diary" : ""}.`,
       ),
       suggestions: ["Unlock or reduce servings of the items highest in that nutrient.", "Allow more dining locations."],
     };
   }
 
   // Calorie and macro target diagnosis.
-  const macroRows = targets.macros ? macroTargetRows(planMeals, targets.macros) : null;
+  const macroRows = targets.macros ? macroTargetRows(planMeals, targets.macros, diary) : null;
   const missed = macroSlacks.filter((m) => (solved.values.get(m.v) ?? 0) > 1e-6);
   if (missed.length && macroRows && targets.macros) {
     status = "infeasible";
@@ -516,7 +594,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
       const row = macroRows.find((r) => r.id === id)!;
       const unit = id === "energy" ? "kcal" : "g";
       const fmt = (v: number) => `${Math.round(v).toLocaleString("en-US")} ${unit}`;
-      return `The closest plan these menus allow has ${fmt(row.value ?? 0)} of ${id === "energy" ? "calories" : nutrientName(id)}, outside your ${fmt(row.target)} ±${pctTol}% target (${fmt(row.min)}–${fmt(row.max)}).`;
+      return `The closest plan these menus allow has ${fmt(row.value ?? 0)} of ${id === "energy" ? "calories" : nutrientName(id)}${diary ? " for the day (diary included)" : ""}, outside your ${fmt(row.target)} ±${pctTol}% target (${fmt(row.min)}–${fmt(row.max)}).`;
     });
     infeasibility = {
       reasons: [...(infeasibility?.reasons ?? []), ...reasonsM],
@@ -528,13 +606,37 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     };
   }
 
+  // Per-meal calorie diagnosis.
+  const missedMeals = mealSlacks.filter((m) => (solved.values.get(m.v) ?? 0) > 1e-6);
+  if (missedMeals.length && targets.macros) {
+    status = "infeasible";
+    const pctTol = Math.round(targets.macros.tolerance * 100);
+    const fmt = (v: number) => `${Math.round(v).toLocaleString("en-US")} kcal`;
+    const reasonsE = [...new Set(missedMeals.map((m) => m.mi))].map((mi) => {
+      const meal = planMeals[mi];
+      const t = meal.energyTarget!;
+      const kcal = energyTotal(dayLines([meal], null)).value ?? 0;
+      return `The closest ${meal.label.toLowerCase()} these menus allow has ${fmt(kcal)}, outside its ${fmt(t.target)} ±${pctTol}% share (${fmt(t.min)}–${fmt(t.max)}).`;
+    });
+    infeasibility = {
+      reasons: [...(infeasibility?.reasons ?? []), ...reasonsE],
+      suggestions: [
+        ...new Set([
+          ...(infeasibility?.suggestions ?? []),
+          "Let calories split flexibly between meals, or change this meal's calories.",
+          "Allow more items per meal, more servings per item, or more dining locations.",
+        ]),
+      ],
+    };
+  }
+
   const summary = summarizePlan(planMeals, coverage);
   for (const m of planMeals) {
     if (m.status === "unavailable" && m.note) warnings.push(m.note);
   }
   for (const m of meals) {
     if (m.filteredOut > 0 && m.filterSummary.length) {
-      warnings.push(`${m.period[0].toUpperCase()}${m.period.slice(1)}: ${m.filteredOut} items hidden by your filters (${m.filterSummary.slice(0, 3).join("; ")}).`);
+      warnings.push(`${m.label}: ${m.filteredOut} items hidden by your filters (${m.filterSummary.slice(0, 3).join("; ")}).`);
     }
   }
 
@@ -558,6 +660,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
       shown: true,
     },
     macroTargets: macroRows,
+    diary,
     summary,
     warnings: [...warnings, ...targets.notes],
     infeasibility,
@@ -585,7 +688,7 @@ function emptyResult(
 ): PlanResult {
   const filterHints = meals.flatMap((m) =>
     m.filteredOut > 0 && m.filterSummary.length
-      ? [`${m.period}: ${m.filteredOut} items were removed by your filters (${m.filterSummary.slice(0, 3).join("; ")}).`]
+      ? [`${m.label}: ${m.filteredOut} items were removed by your filters (${m.filterSummary.slice(0, 3).join("; ")}).`]
       : [],
   );
   return {
@@ -595,6 +698,8 @@ function emptyResult(
     strategy: req.strategy,
     referenceLabel: targets.profile.label,
     meals: meals.map((m) => ({
+      key: m.key,
+      label: m.label,
       period: m.period,
       status: "unavailable",
       locationId: null,
@@ -606,6 +711,7 @@ function emptyResult(
     targets: targets.summary,
     coverage: computeCoverage([], targets.summary),
     energy: { value: null, low: null, high: null, min: null, max: null, shown: true },
+    diary: null,
     summary: [],
     warnings: targets.notes,
     infeasibility: { reasons: [...reasons, ...filterHints], suggestions },
@@ -623,13 +729,14 @@ function emptyResult(
   };
 }
 
-/** Planned totals against the calorie and macro targets that were set (energy first). */
-export function macroTargetRows(meals: PlanMeal[], spec: MacroSpec): MacroTargetRow[] {
+/** The day's totals (plan plus any diary food) against the calorie and macro targets that were set (energy first). */
+export function macroTargetRows(meals: PlanMeal[], spec: MacroSpec, diary: DiaryBaseline | null = null): MacroTargetRow[] {
   const items = meals.flatMap((m) => m.items);
   return MACRO_IDS.filter((id) => spec.targets[id] !== undefined).map((id) => {
     const target = spec.targets[id]!;
-    let value = 0;
-    let known = 0;
+    const fromDiary = diary?.nutrients[id]?.value;
+    let value = fromDiary ?? 0;
+    let known = fromDiary !== undefined && fromDiary !== null ? 1 : 0;
     let unknownItems = 0;
     for (const i of items) {
       const v = i.nutrients[id]?.value;
@@ -639,7 +746,7 @@ export function macroTargetRows(meals: PlanMeal[], spec: MacroSpec): MacroTarget
         known++;
       }
     }
-    return { id, target, min: target * (1 - spec.tolerance), max: target * (1 + spec.tolerance), value: known ? value : null, unknownItems };
+    return { id, target, ...band(target, spec.tolerance), value: known ? value : null, unknownItems };
   });
 }
 

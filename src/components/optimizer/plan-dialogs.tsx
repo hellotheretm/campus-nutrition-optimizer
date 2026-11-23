@@ -12,10 +12,11 @@ import { MEAL_PERIOD_LABELS } from "@/lib/menus/types";
 import { nutrientName } from "@/lib/optimizer/targets";
 import { STRATEGIES, type PlanMeal, type PlanRequest, type PlanResult, type StrategyKey } from "@/lib/optimizer/types";
 import { cn } from "@/lib/utils";
-import { goalsMet, liveTotals, periodIndex, type Working } from "./shared";
+import { goalsMet, keyOf, liveTotals, orderMeals, type Working } from "./shared";
 
 interface MealDiff {
-  period: PlanMeal["period"];
+  key: string;
+  label: string;
   location: { before: string | null; after: string | null };
   added: { name: string; servings: number }[];
   removed: { name: string; servings: number }[];
@@ -24,14 +25,16 @@ interface MealDiff {
 }
 
 function diffMeals(before: PlanMeal[], after: PlanMeal[]): MealDiff[] {
-  const periods = [...new Set([...before, ...after].map((m) => m.period))].sort((a, b) => periodIndex(a) - periodIndex(b));
-  return periods.map((p) => {
-    const b = before.find((m) => m.period === p);
-    const a = after.find((m) => m.period === p);
+  const keys = [...new Set(orderMeals([...after, ...before]).map(keyOf))];
+  return keys.map((k) => {
+    const b = before.find((m) => keyOf(m) === k);
+    const a = after.find((m) => keyOf(m) === k);
+    const meal = (a ?? b)!;
     const bi = b?.items ?? [];
     const ai = a?.items ?? [];
     return {
-      period: p,
+      key: k,
+      label: meal.label ?? MEAL_PERIOD_LABELS[meal.period],
       location: { before: bi.length ? (b?.locationName ?? null) : null, after: ai.length ? (a?.locationName ?? null) : null },
       added: ai.filter((x) => !bi.some((y) => y.foodId === x.foodId)).map((x) => ({ name: x.name, servings: x.servings })),
       removed: bi.filter((x) => !ai.some((y) => y.foodId === x.foodId)).map((x) => ({ name: x.name, servings: x.servings })),
@@ -101,9 +104,9 @@ export function DiffDialog({
               {diffs.map((d) => {
                 const any = d.added.length || d.removed.length || d.changed.length;
                 return (
-                  <li key={d.period} className="grid gap-1.5 rounded-2xl p-3 ring-1 ring-border">
+                  <li key={d.key} className="grid gap-1.5 rounded-2xl p-3 ring-1 ring-border">
                     <p className="flex flex-wrap items-baseline justify-between gap-2">
-                      <span className="font-medium">{MEAL_PERIOD_LABELS[d.period]}</span>
+                      <span className="font-medium">{d.label}</span>
                       <span className="text-xs text-muted-foreground">
                         {d.location.before !== d.location.after && d.location.before && d.location.after
                           ? `${d.location.before} → ${d.location.after}`

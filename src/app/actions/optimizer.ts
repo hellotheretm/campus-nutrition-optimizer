@@ -5,16 +5,19 @@ import { z } from "zod";
 import { getDb } from "@/db/client";
 import { getSessionUser } from "@/lib/auth";
 import { getUniversity } from "@/lib/data/catalog";
-import { addPlanItemsToDiary, getPlan, savePlan } from "@/lib/data/user";
+import { addPlanItemsToDiary, diaryBaseline, getPlan, getProfile, savePlan } from "@/lib/data/user";
 import { todayIn } from "@/lib/dates";
 import { generatePlan, PlanRequestError } from "@/lib/optimizer";
 import { loadCandidates } from "@/lib/optimizer/candidates";
 import { evaluatePlan, modelStatsSchema, planSelectionSchema } from "@/lib/optimizer/evaluate";
 import {
   dietaryPreferencesSchema,
+  hasMacroTargets,
   PLAN_PERIODS,
   planRequestSchema,
+  resolveMacroTargets,
   STRATEGY_KEYS,
+  type DiaryBaseline,
   type MenuChoice,
   type PlanRequest,
   type PlanResult,
@@ -39,12 +42,27 @@ function sanitize(input: unknown): PlanRequest {
   return planRequestSchema.parse(input);
 }
 
+/**
+ * The request as the server will plan it, plus the diary to plan around. Signed-in users' daily
+ * targets always come from their Settings (whatever the browser sent), and their diary for the
+ * date is read here, so neither depends on numbers from the browser. Guests plan with the
+ * targets they entered and no diary.
+ */
+async function prepare(input: unknown, userId: string | null): Promise<{ request: PlanRequest; diary: DiaryBaseline | null }> {
+  const request = sanitize(input);
+  if (!userId) return { request: { ...request, diary: "none" }, diary: null };
+  const profile = await getProfile(userId);
+  const usable = hasMacroTargets(profile.targets) && !resolveMacroTargets(profile.targets).error;
+  const diary = await diaryBaseline(userId, request.date, request.diary);
+  return { request: { ...request, macroTargets: usable ? profile.targets : null }, diary };
+}
+
 export async function generatePlanAction(input: unknown): Promise<ActionResult<{ request: PlanRequest; result: PlanResult }>> {
   try {
     const gate = await allowed("opt", 30, 90);
     if (!gate.ok) return fail(SLOW_DOWN);
-    const request = sanitize(input);
-    const result = await generatePlan(request);
+    const { request, diary } = await prepare(input, gate.user?.id ?? null);
+    const result = await generatePlan(request, diary);
     return ok({ request, result });
   } catch (e) {
     if (e instanceof PlanRequestError) return fail(e.message);
@@ -59,14 +77,14 @@ export async function compareStrategiesAction(
   try {
     const gate = await allowed("optcmp", 6, 20);
     if (!gate.ok) return fail(SLOW_DOWN);
-    const base = sanitize(input);
+    const { request: base, diary } = await prepare(input, gate.user?.id ?? null);
     const out: { strategy: StrategyKey; request: PlanRequest; result: PlanResult }[] = [];
     // One at a time: the embedded database handles one connection.
     for (const strategy of STRATEGY_KEYS) {
       if (strategy === base.strategy) continue;
       const request = { ...base, strategy, avoidSignatures: [], freshMeals: [] };
       try {
-        out.push({ strategy, request, result: await generatePlan(request) });
+        out.push({ strategy, request, result: await generatePlan(request, diary) });
       } catch (e) {
         if (!(e instanceof PlanRequestError)) console.error(e);
       }
@@ -147,9 +165,9 @@ export async function savePlanAction(input: unknown): Promise<ActionResult<{ id:
     const limit = await rateLimit(`plansave:${user.id}`, 60, 600);
     if (!limit.ok) return fail(SLOW_DOWN);
     const data = saveSchema.parse(input);
-    const request = sanitize(data.request);
+    const { request, diary } = await prepare(data.request, user.id);
     if (!(await getUniversity(request.universityId))) return fail("Unknown university.");
-    const result = await evaluatePlan(request, data.meals, data.stats, data.edited);
+    const result = await evaluatePlan(request, data.meals, data.stats, data.edited, diary);
     if (!result.meals.some((m) => m.items.length)) return fail("This plan has no items to save.");
     const id = await savePlan(user.id, request, result, data.name || undefined);
     revalidateUserPages();
@@ -183,7 +201,7 @@ export async function addPlanToDiaryAction(input: unknown): Promise<ActionResult
     const planId = data.planId && (await getPlan(user.id, data.planId)) ? data.planId : null;
     // Location names come from the stored menu, not from the browser.
     const evaluated = await evaluatePlan(
-      planRequestSchema.parse({ universityId: data.universityId, date: data.date, meals: data.meals.map((m) => ({ period: m.period })) }),
+      planRequestSchema.parse({ universityId: data.universityId, date: data.date, meals: data.meals.map((m) => ({ key: m.key, period: m.period })) }),
       data.meals,
       null,
       true,

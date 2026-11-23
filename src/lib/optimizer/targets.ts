@@ -10,7 +10,7 @@
 import type { MealPeriod } from "@/db/schema";
 import { NUTRIENTS, type NutrientId } from "@/lib/nutrition/nutrients";
 import { getReferenceProfile, type ReferenceProfile } from "@/lib/nutrition/references";
-import { hasMacroTargets, MACRO_IDS, resolveMacroTargets, type MacroId, type PlanRequest, type StrategyKey, type TargetSummary } from "./types";
+import { hasMacroTargets, MACRO_IDS, MEAL_CALORIES_MIN, resolveMacroTargets, type DiaryBaseline, type MacroId, type MealCalorieMode, type PlanRequest, type StrategyKey, type TargetSummary } from "./types";
 
 /** Nutrients the optimizer tries to cover. Biotin, iodine, chromium and molybdenum are left
  * out because food composition data for them is too sparse to plan with. */
@@ -89,7 +89,8 @@ export const DEFAULT_SHARES: Record<MealPeriod, number> = {
   other: 0.2,
 };
 
-export type Scope = "day" | MealPeriod;
+/** "day", or a meal's key. */
+export type Scope = string;
 
 export interface GoalSpec {
   id: NutrientId;
@@ -130,19 +131,18 @@ export interface Targets {
   amdr: boolean;
   /** Calorie and macro targets, or null when none were set. */
   macros: MacroSpec | null;
-  shares: Partial<Record<MealPeriod, number>>;
+  /** Each meal's share of the day (by meal key), used to spread protein. */
+  shares: Record<string, number>;
   /** Day-level summary used for coverage tables. */
   summary: TargetSummary[];
   notes: string[];
 }
 
-export function mealShares(
-  periods: MealPeriod[],
-  custom?: Partial<Record<MealPeriod, number>>,
-): Partial<Record<MealPeriod, number>> {
-  const raw = periods.map((p) => custom?.[p] ?? DEFAULT_SHARES[p] ?? 0.25);
+/** Each meal's share of the day, by meal key (typical shares for the period, normalized). */
+export function mealShares(meals: { key: string; period: MealPeriod }[]): Record<string, number> {
+  const raw = meals.map((m) => DEFAULT_SHARES[m.period] ?? 0.25);
   const total = raw.reduce((a, b) => a + b, 0) || 1;
-  return Object.fromEntries(periods.map((p, i) => [p, raw[i] / total]));
+  return Object.fromEntries(meals.map((m, i) => [m.key, raw[i] / total]));
 }
 
 function strategyWeights(strategy: StrategyKey, id: NutrientId, base: number): number {
@@ -161,10 +161,55 @@ export function describeMacroTargets(targets: Partial<Record<MacroId, number>>):
   return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : (parts[0] ?? "");
 }
 
-export function buildTargets(req: PlanRequest, periods: MealPeriod[]): Targets {
+/**
+ * Splits the calories left for the day over the meals being planned.
+ * - even: the same for every meal.
+ * - custom: meals with calories keep them; blank meals share what's left equally.
+ *   With every meal set, they must add up to what's left (within the tolerance).
+ * Pure, so the browser can show the same numbers before planning.
+ */
+export function allotMealCalories(
+  mode: MealCalorieMode,
+  left: number,
+  meals: { key: string; calories: number | null }[],
+  tolerance: number,
+): { targets: Record<string, number>; error: string | null } {
+  const fmt = (v: number) => `${Math.round(v).toLocaleString("en-US")} kcal`;
+  const targets: Record<string, number> = {};
+  if (!meals.length || mode === "flexible") return { targets, error: null };
+  if (!(left > 0)) return { targets, error: `There are no calories left to plan (${fmt(left)}).` };
+  if (mode === "even") {
+    for (const m of meals) targets[m.key] = left / meals.length;
+  } else {
+    const set = meals.filter((m) => m.calories !== null);
+    const free = meals.filter((m) => m.calories === null);
+    const assigned = set.reduce((s, m) => s + (m.calories ?? 0), 0);
+    for (const m of set) targets[m.key] = m.calories!;
+    if (free.length) {
+      const rest = left - assigned;
+      if (rest < MEAL_CALORIES_MIN * free.length) {
+        return {
+          targets,
+          error: `Your meal calories add up to ${fmt(assigned)}, leaving ${fmt(Math.max(0, rest))} of the ${fmt(left)} left for the day for ${free.length} other meal${free.length === 1 ? "" : "s"}. Lower some meals or set every meal.`,
+        };
+      }
+      for (const m of free) targets[m.key] = rest / free.length;
+    } else if (Math.abs(assigned - left) > left * tolerance) {
+      return {
+        targets,
+        error: `Your meal calories add up to ${fmt(assigned)}, but ${fmt(left)} are left for the day (±${Math.round(tolerance * 100)}%). Make them add up, or leave a meal blank to take the rest.`,
+      };
+    }
+  }
+  return { targets, error: null };
+}
+
+/** Targets for a request. `diary` (food already logged for the date) only changes how protein is spread over the meals. */
+export function buildTargets(req: PlanRequest, diary: DiaryBaseline | null = null): Targets {
   const profile = getReferenceProfile(req.reference);
   const minor = profile.isMinor;
-  const shares = mealShares(periods);
+  const meals = req.meals as { key: string; period: MealPeriod }[];
+  const shares = mealShares(meals);
   const notes: string[] = [];
   const focus = new Set(req.focus);
 
@@ -208,12 +253,13 @@ export function buildTargets(req: PlanRequest, periods: MealPeriod[]): Targets {
     goals.push({ id, target: amount, weight, scope: "day" });
   }
 
-  // Spread protein across meals a little (each meal gets at least half its share).
-  if (periods.length > 1) {
+  // Spread protein across meals a little (each meal gets at least half its share of what's left after the diary).
+  if (meals.length > 1) {
     const protein = summary.find((s) => s.id === "protein");
-    if (protein?.amount) {
-      for (const p of periods) {
-        goals.push({ id: "protein", target: protein.amount * (shares[p] ?? 0) * 0.5, weight: 0.4, scope: p });
+    const left = protein?.amount ? protein.amount - (diary?.nutrients.protein?.value ?? 0) : 0;
+    if (left > 0) {
+      for (const m of meals) {
+        goals.push({ id: "protein", target: left * (shares[m.key] ?? 0) * 0.5, weight: 0.4, scope: m.key });
       }
     }
   }

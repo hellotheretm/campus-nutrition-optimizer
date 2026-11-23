@@ -50,6 +50,7 @@ function cand(foodId: string, name: string, n: Partial<Record<NutrientId, number
     name,
     station: null,
     period: "breakfast",
+    mealKey: "breakfast",
     locationId: "A",
     locationName: "A",
     servingLabel: "1 cup",
@@ -75,7 +76,7 @@ async function breakfast(names: [string, string], input: Partial<PlanRequestInpu
     cand("fruit", "Banana", { energy: 105, carbohydrate: 27, fiber: 3, potassium: 420, vitamin_c: 10 }),
   ];
   const req = planRequestSchema.parse({ universityId: "u", date: "2026-11-20", meals: [{ period: "breakfast" }], maxItemsPerMeal: MAX_ITEMS_NO_LIMIT, maxServingsPerItem: 1, ...input });
-  const plan = await optimize(req, [{ period: "breakfast", candidates: menu, unavailableNote: null, filteredOut: 0, filterSummary: [] }], buildTargets(req, ["breakfast"]));
+  const plan = await optimize(req, [{ key: "breakfast", label: "Breakfast", period: "breakfast", candidates: menu, unavailableNote: null, filteredOut: 0, filterSummary: [] }], buildTargets(req));
   return plan.meals[0].items.map((i) => i.foodId).filter((id) => id === "m1" || id === "m2").length;
 }
 

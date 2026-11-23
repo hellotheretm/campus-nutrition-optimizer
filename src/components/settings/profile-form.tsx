@@ -260,7 +260,7 @@ export function ProfileForm({ initial, universities }: { initial: ProfileData; u
       <Section
         id="goals-heading"
         title="Daily targets (optional)"
-        description="Used as the starting targets in the meal optimizer and shown in the diary. You never need targets to use either."
+        description="Every meal plan follows these targets for the day (food already in your diary counts toward them), and the diary shows them. Change them any time. You never need targets to use either."
       >
         <TargetsFields value={p.targets} onChange={(v) => set("targets", v)} />
         <p className="text-xs text-muted-foreground">

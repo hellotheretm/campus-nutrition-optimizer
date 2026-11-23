@@ -3,10 +3,11 @@
  * recalculation while a user edits servings). Pure functions only.
  */
 import type { Confidence, NutrientEstimate, NutrientEstimates } from "@/lib/nutrition/estimator";
+import type { Provenance } from "@/lib/nutrition/provenance";
 import type { NutrientId } from "@/lib/nutrition/nutrients";
-import { sumNutrients } from "@/lib/nutrition/totals";
+import { sumNutrients, type NutrientTotals } from "@/lib/nutrition/totals";
 import { nutrientName } from "./targets";
-import type { CoverageRow, PlanMeal, TargetSummary } from "./types";
+import type { CoverageRow, DiaryBaseline, PlanMeal, TargetSummary } from "./types";
 
 /** How far an estimate is pulled toward its low end, by confidence, when the optimizer counts it. */
 export const CONFIDENCE_DISCOUNT: Record<Confidence, number> = {
@@ -42,6 +43,22 @@ export interface PlanLine {
 
 export function planLines(meals: PlanMeal[]): PlanLine[] {
   return meals.flatMap((m) => m.items.map((i) => ({ nutrients: i.nutrients, servings: i.servings })));
+}
+
+/** The plan's items plus the food already in the diary (one line), i.e. the day's totals. */
+export function dayLines(meals: PlanMeal[], diary: DiaryBaseline | null | undefined): PlanLine[] {
+  return diary ? [{ nutrients: diary.nutrients, servings: 1 }, ...planLines(meals)] : planLines(meals);
+}
+
+/** Turns added-up diary entries into one set of estimates (value, range and confidence kept; unknowns stay unknown). */
+export function baselineFromTotals(totals: NutrientTotals): Partial<NutrientEstimates> {
+  const out: Partial<NutrientEstimates> = {};
+  for (const [id, t] of Object.entries(totals) as [NutrientId, NonNullable<NutrientTotals[NutrientId]>][]) {
+    if (!t || t.known === 0) continue;
+    const provenance = (Object.entries(t.provenance).sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0]?.[0] ?? "approximate") as Provenance;
+    out[id] = { value: t.value, low: t.low, high: t.high, provenance, confidence: t.confidence };
+  }
+  return out;
 }
 
 export function computeCoverage(lines: PlanLine[], targets: TargetSummary[]): CoverageRow[] {

@@ -2,14 +2,15 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 import { EmptyState, PageHeader, Panel } from "@/components/app/page-header";
 import { OptimizerApp } from "@/components/optimizer/optimizer-app";
-import type { OptimizerDefaults, OptimizerUniversity, PeriodAvailability, SavedPlanView } from "@/components/optimizer/shared";
+import type { DiaryCounts, DiarySummary, OptimizerDefaults, OptimizerUniversity, PeriodAvailability, SavedPlanView } from "@/components/optimizer/shared";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getSessionUser } from "@/lib/auth";
 import { defaultUniversity, getMenuView, listUniversities } from "@/lib/data/catalog";
-import { DEFAULT_DIETARY, getPlan, getProfile, NO_TARGETS } from "@/lib/data/user";
+import { DEFAULT_DIETARY, getPlan, getProfile, listDiary, NO_TARGETS, type DiaryEntry } from "@/lib/data/user";
 import { addDays, formatTime, isIsoDate, todayIn } from "@/lib/dates";
 import { MEAL_PERIOD_LABELS } from "@/lib/menus/types";
-import { PLAN_PERIODS, planRequestSchema, type PlanResult } from "@/lib/optimizer/types";
+import { sumNutrients } from "@/lib/nutrition/totals";
+import { mealLabels, PLAN_PERIODS, planRequestSchema, type PlanResult } from "@/lib/optimizer/types";
 
 export const metadata: Metadata = {
   title: "Meal optimizer",
@@ -51,6 +52,20 @@ function OptimizerSkeleton() {
   );
 }
 
+/** Calories and macros of diary entries (unknown values stay unknown). */
+function countsOf(rows: DiaryEntry[]): DiaryCounts {
+  const t = sumNutrients(rows.map((r) => ({ nutrients: r.nutrients, factor: 1 })));
+  const v = (id: "energy" | "protein" | "fat" | "carbohydrate") => (t[id]?.known ? t[id]!.value : null);
+  return { entries: rows.length, energy: v("energy"), protein: v("protein"), fat: v("fat"), carbohydrate: v("carbohydrate") };
+}
+
+/** Older saved plans have no meal keys or labels; fill them in from the periods. */
+function withMealKeys(result: PlanResult): PlanResult {
+  const keyed = result.meals.map((m) => ({ ...m, key: m.key ?? m.period }));
+  const labels = mealLabels(keyed);
+  return { ...result, meals: keyed.map((m) => ({ ...m, label: m.label ?? labels[m.key] })) };
+}
+
 function one(v: string | string[] | undefined): string | undefined {
   return Array.isArray(v) ? v[0] : v;
 }
@@ -68,7 +83,7 @@ async function OptimizerContent({ searchParams }: { searchParams: SearchParams }
     const row = await getPlan(user.id, planParam);
     const request = row ? planRequestSchema.safeParse(row.request) : null;
     if (row && request?.success) {
-      saved = { id: row.id, name: row.name, request: request.data, result: row.result as unknown as PlanResult };
+      saved = { id: row.id, name: row.name, request: request.data, result: withMealKeys(row.result as unknown as PlanResult) };
     }
   }
 
@@ -108,6 +123,13 @@ async function OptimizerContent({ searchParams }: { searchParams: SearchParams }
     }),
   }));
 
+  // What's already in the diary for this date, so the optimizer can plan around it.
+  let diary: DiarySummary | null = null;
+  if (user) {
+    const rows = await listDiary(user.id, date, date);
+    diary = { all: countsOf(rows), logged: countsOf(rows.filter((r) => r.status === "logged")) };
+  }
+
   const ageGroup = profile?.ageGroup ?? "unspecified";
   const defaults: OptimizerDefaults = {
     reference: { standard: profile?.referenceStandard ?? "fda_dv", ageGroup, sex: profile?.sex ?? "unspecified" },
@@ -141,6 +163,7 @@ async function OptimizerContent({ searchParams }: { searchParams: SearchParams }
       showCalories={profile?.showCalories ?? true}
       showPercentages={profile?.showPercentages ?? true}
       saved={saved}
+      diary={diary}
     />
   );
 }

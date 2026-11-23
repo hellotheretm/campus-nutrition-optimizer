@@ -71,10 +71,11 @@ export function MealCard({
   /** The plan's daily reference amounts, for each item's nutrient bars. */
   references: Partial<Record<NutrientId, number>>;
 }) {
-  const label = MEAL_PERIOD_LABELS[meal.period];
+  // Older saved plans have no label or key: the period stands in.
+  const label = meal.label ?? MEAL_PERIOD_LABELS[meal.period];
   const [picker, setPicker] = useState<{ mode: "add" } | { mode: "replace"; foodId: string; name: string } | null>(null);
   const kcal = useMemo(() => energyTotal(planLines([meal])), [meal]);
-  const headingId = `meal-${meal.period}-heading`;
+  const headingId = `meal-${meal.key ?? meal.period}-heading`;
   const unlocked = meal.items.filter((i) => !i.locked).length;
 
   return (
@@ -91,7 +92,12 @@ export function MealCard({
                 {meal.locationName}
               </span>
             )}
-            {showCalories && kcal.value !== null && meal.items.length > 0 && <span>≈ {fmtKcal(kcal.value)}</span>}
+            {showCalories && kcal.value !== null && meal.items.length > 0 && (
+              <span className={cn(meal.energyTarget && (kcal.value < meal.energyTarget.min || kcal.value > meal.energyTarget.max) && "font-medium text-foreground")}>
+                ≈ {fmtKcal(kcal.value)}
+                {meal.energyTarget ? ` of ${fmtKcal(meal.energyTarget.target)}` : ""}
+              </span>
+            )}
             {meal.items.length > 0 && (
               <span>
                 {meal.items.length} item{meal.items.length === 1 ? "" : "s"}

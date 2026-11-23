@@ -12,7 +12,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { formatDate } from "@/lib/dates";
 import { MEAL_PERIOD_LABELS } from "@/lib/menus/types";
 import { explainItems } from "@/lib/optimizer/coverage";
-import { hasMacroTargets, resolveMacroTargets, STRATEGIES, type MenuChoice, type PlanMeal, type PlanPeriod, type PlanRequest, type PlanRequestInput, type PlanResult, type TargetSummary } from "@/lib/optimizer/types";
+import { hasMacroTargets, resolveMacroTargets, STRATEGIES, type MenuChoice, type PlanMeal, type PlanRequest, type PlanRequestInput, type PlanResult, type TargetSummary } from "@/lib/optimizer/types";
 import { MealCard } from "./meal-card";
 import { CompareDialog, DiffDialog, SaveDialog, type StrategyOption } from "./plan-dialogs";
 import { PlanInputs } from "./plan-inputs";
@@ -23,14 +23,17 @@ import {
   goalsMet,
   initialInputs,
   inputsFromRequest,
+  calorieBudget,
   itemFromChoice,
+  keyOf,
   liveTotals,
   loadStoredSettings,
   lockedOf,
-  periodIndex,
+  orderMeals,
   selectionOf,
   servable,
   storeSettings,
+  type DiarySummary,
   type Inputs,
   type OptimizerDefaults,
   type OptimizerUniversity,
@@ -39,7 +42,7 @@ import {
   type Working,
 } from "./shared";
 
-const key = (period: string, foodId: string) => `${period}:${foodId}`;
+const key = (mealKey: string, foodId: string) => `${mealKey}:${foodId}`;
 
 /** Recomputes each item's "why" after edits (pure; returns copies). */
 function withWhy(meals: PlanMeal[], targets: TargetSummary[]): PlanMeal[] {
@@ -50,10 +53,10 @@ function withWhy(meals: PlanMeal[], targets: TargetSummary[]): PlanMeal[] {
 
 /** Keeps the user's own lock choices when items come back from a solve where others were held in place. */
 function restoreLocks(meals: PlanMeal[], userLocked: Set<string>): PlanMeal[] {
-  return meals.map((m) => ({ ...m, items: m.items.map((i) => ({ ...i, locked: userLocked.has(key(m.period, i.foodId)) })) }));
+  return meals.map((m) => ({ ...m, items: m.items.map((i) => ({ ...i, locked: userLocked.has(key(keyOf(m), i.foodId)) })) }));
 }
 
-const userLocks = (meals: PlanMeal[]) => new Set(lockedOf(meals).map((l) => key(l.period, l.foodId)));
+const userLocks = (meals: PlanMeal[]) => new Set(lockedOf(meals).map((l) => key(l.meal, l.foodId)));
 const failed = (r: PlanResult) => r.status === "infeasible" || r.status === "no_menu" || r.status === "error";
 
 export function OptimizerApp({
@@ -69,6 +72,7 @@ export function OptimizerApp({
   showCalories,
   showPercentages,
   saved,
+  diary,
 }: {
   university: OptimizerUniversity;
   universities: { id: string; slug: string; name: string; isDemo: boolean }[];
@@ -82,6 +86,8 @@ export function OptimizerApp({
   showCalories: boolean;
   showPercentages: boolean;
   saved: SavedPlanView | null;
+  /** What's already in the diary for this date (signed-in users), or null. */
+  diary: DiarySummary | null;
 }) {
   const router = useRouter();
   const [inputs, setInputs] = useState<Inputs>(() => (saved ? inputsFromRequest(saved.request, availability) : initialInputs(defaults, availability)));
@@ -112,7 +118,7 @@ export function OptimizerApp({
     restored.current = true;
     const stored = loadStoredSettings(!signedIn);
     // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time restore from browser storage after hydration
-    if (stored) setInputs((prev) => applyStored(prev, stored));
+    if (stored) setInputs((prev) => applyStored(prev, stored, signedIn));
   }, [signedIn]);
   useEffect(() => {
     if (restored.current) storeSettings(inputs, !signedIn);
@@ -140,18 +146,27 @@ export function OptimizerApp({
   }
 
   function validateGoals(): string | null {
-    return hasMacroTargets(inputs.targets) ? resolveMacroTargets(inputs.targets).error : null;
+    const targetError = hasMacroTargets(inputs.targets) ? resolveMacroTargets(inputs.targets).error : null;
+    return targetError ?? calorieBudget(inputs, availability, diary).error;
   }
 
   function buildRequest(): PlanRequestInput {
-    const meals = availability
-      .filter((a) => inputs.meals[a.period].enabled && servable(a).length > 0)
-      .map((a) => ({ period: a.period, locationIds: inputs.meals[a.period].locationIds.filter((id) => servable(a).some((l) => l.id === id)) }));
-    const locks = working && working.request.date === date ? lockedOf(working.meals).filter((l) => meals.some((m) => m.period === l.period)) : [];
+    const open = (m: Inputs["meals"][number]) => servable(availability.find((a) => a.period === m.period)!);
+    const meals = orderMeals(inputs.meals)
+      .filter((m) => open(m).length > 0)
+      .map((m) => ({
+        key: m.key,
+        period: m.period,
+        locationIds: m.locationIds.filter((id) => open(m).some((l) => l.id === id)),
+        calories: inputs.mealCalories === "custom" ? m.calories : null,
+      }));
+    const locks = working && working.request.date === date ? lockedOf(working.meals).filter((l) => meals.some((m) => m.key === l.meal)) : [];
     return {
       universityId: university.id,
       date,
       meals,
+      mealCalories: inputs.mealCalories,
+      diary: inputs.diary,
       strategy: inputs.strategy,
       reference: inputs.reference,
       macroTargets: hasMacroTargets(inputs.targets) ? inputs.targets : null,
@@ -164,7 +179,7 @@ export function OptimizerApp({
   }
 
   function fresh(request: PlanRequest, result: PlanResult, prev?: Working | null): Working {
-    const locked = prev ? userLocks(prev.meals) : new Set(request.locks.map((l) => key(l.period, l.foodId)));
+    const locked = prev ? userLocks(prev.meals) : new Set(request.locks.map((l) => key(l.meal, l.foodId)));
     return {
       request,
       result,
@@ -207,70 +222,71 @@ export function OptimizerApp({
     if (undoLabel) toast(undoLabel, { action: { label: "Undo", onClick: () => setWorking(prev) } });
   }
 
-  const mapItem = (period: string, foodId: string, f: (i: PlanMeal["items"][number]) => PlanMeal["items"][number]) => (meals: PlanMeal[]) =>
-    meals.map((m) => (m.period === period ? { ...m, items: m.items.map((i) => (i.foodId === foodId ? f(i) : i)) } : m));
+  const mapItem = (mealKey: string, foodId: string, f: (i: PlanMeal["items"][number]) => PlanMeal["items"][number]) => (meals: PlanMeal[]) =>
+    meals.map((m) => (keyOf(m) === mealKey ? { ...m, items: m.items.map((i) => (i.foodId === foodId ? f(i) : i)) } : m));
+  const labelOf = (m: PlanMeal) => m.label ?? MEAL_PERIOD_LABELS[m.period];
 
-  function regenerateMeal(period: PlanPeriod) {
+  function regenerateMeal(mealKey: string) {
     if (!working) return;
     const w = working;
-    const meal = w.meals.find((m) => m.period === period)!;
-    const label = MEAL_PERIOD_LABELS[period].toLowerCase();
+    const meal = w.meals.find((m) => keyOf(m) === mealKey)!;
+    const label = labelOf(meal).toLowerCase();
     const lockedIds = new Set(meal.items.filter((i) => i.locked).map((i) => i.foodId));
     const current = meal.items.filter((i) => !i.locked).map((i) => i.foodId);
     // Versions of this meal shown before, so repeated presses don't cycle back.
-    const history = (w.mealHistory?.[period] ?? []).slice(-3).map((ids) => ids.filter((id) => !lockedIds.has(id)));
+    const history = (w.mealHistory?.[mealKey] ?? []).slice(-3).map((ids) => ids.filter((id) => !lockedIds.has(id)));
     const base: PlanRequestInput = {
       ...w.request,
-      locks: lockedOf(w.meals, (m, i) => m.period !== period || i.locked),
+      locks: lockedOf(w.meals, (m, i) => keyOf(m) !== mealKey || i.locked),
       avoidSignatures: [],
     };
-    const freshOf = (lists: string[][]) => lists.filter((ids) => ids.length).map((foodIds) => ({ period, foodIds }));
-    void run(`meal:${period}`, async () => {
+    const freshOf = (lists: string[][]) => lists.filter((ids) => ids.length).map((foodIds) => ({ meal: mealKey, foodIds }));
+    void run(`meal:${mealKey}`, async () => {
       let res = await generatePlanAction({ ...base, freshMeals: freshOf([current, ...history]) });
-      const empty = (x: typeof res) => x.ok && (failed(x.data.result) || !x.data.result.meals.find((m) => m.period === period)?.items.length);
+      const empty = (x: typeof res) => x.ok && (failed(x.data.result) || !x.data.result.meals.find((m) => keyOf(m) === mealKey)?.items.length);
       if (empty(res) && history.length) res = await generatePlanAction({ ...base, freshMeals: freshOf([current]) });
       if (!res.ok) return void toast.error(res.error);
       const r = res.data.result;
-      const newMeal = r.meals.find((m) => m.period === period);
+      const newMeal = r.meals.find((m) => keyOf(m) === mealKey);
       if (failed(r) || !newMeal || !newMeal.items.length) {
         return void toast.error(r.infeasibility?.reasons[0] ?? `No different ${label} fits your settings. Try unlocking items or allowing more markets.`);
       }
       const locked = userLocks(w.meals);
-      const meals = w.meals.map((m) => (m.period === period ? restoreLocks([newMeal], locked)[0] : m));
+      const meals = w.meals.map((m) => (keyOf(m) === mealKey ? restoreLocks([newMeal], locked)[0] : m));
       setWorking({
         ...w,
         result: r,
         meals: withWhy(meals, r.targets),
         seen: [...w.seen, r.signature].slice(-10),
         planId: null,
-        mealHistory: { ...w.mealHistory, [period]: [...(w.mealHistory?.[period] ?? []), meal.items.map((i) => i.foodId)].slice(-4) },
+        mealHistory: { ...w.mealHistory, [mealKey]: [...(w.mealHistory?.[mealKey] ?? []), meal.items.map((i) => i.foodId)].slice(-4) },
       });
       announce(`New ${label} ready.`);
       toast.success(`New ${label} ready`, { action: { label: "Undo", onClick: () => setWorking(w) } });
     });
   }
 
-  function replaceAuto(period: PlanPeriod, foodId: string) {
+  function replaceAuto(mealKey: string, foodId: string) {
     if (!working) return;
     const w = working;
-    const old = w.meals.find((m) => m.period === period)?.items.find((i) => i.foodId === foodId);
-    const excluded = [...w.request.excluded.filter((e) => !(e.period === period && e.foodId === foodId)), { period, foodId }];
+    const old = w.meals.find((m) => keyOf(m) === mealKey)?.items.find((i) => i.foodId === foodId);
+    const excluded = [...w.request.excluded.filter((e) => !(e.meal === mealKey && e.foodId === foodId)), { meal: mealKey, foodId }];
     const request: PlanRequestInput = {
       ...w.request,
-      locks: lockedOf(w.meals, (m, i) => !(m.period === period && i.foodId === foodId)),
+      locks: lockedOf(w.meals, (m, i) => !(keyOf(m) === mealKey && i.foodId === foodId)),
       excluded,
       freshMeals: [],
       avoidSignatures: [],
     };
-    void run(`meal:${period}`, async () => {
+    void run(`meal:${mealKey}`, async () => {
       const res = await generatePlanAction(request);
       if (!res.ok) return void toast.error(res.error);
       const r = res.data.result;
       if (failed(r)) return void toast.error(r.infeasibility?.reasons[0] ?? "Couldn't find a replacement.");
       const locked = userLocks(w.meals);
-      const newMeal = r.meals.find((m) => m.period === period);
-      const meals = w.meals.map((m) => (m.period === period && newMeal ? restoreLocks([newMeal], locked)[0] : m));
-      const added = newMeal?.items.filter((i) => !w.meals.find((m) => m.period === period)?.items.some((x) => x.foodId === i.foodId)) ?? [];
+      const newMeal = r.meals.find((m) => keyOf(m) === mealKey);
+      const meals = w.meals.map((m) => (keyOf(m) === mealKey && newMeal ? restoreLocks([newMeal], locked)[0] : m));
+      const added = newMeal?.items.filter((i) => !w.meals.find((m) => keyOf(m) === mealKey)?.items.some((x) => x.foodId === i.foodId)) ?? [];
       setWorking({ ...w, request: { ...w.request, excluded }, result: r, meals: withWhy(meals, r.targets), edited: true, planId: null });
       const msg = added.length ? `Replaced ${old?.name ?? "item"} with ${added.map((a) => a.name).join(" and ")}` : `Removed ${old?.name ?? "item"}; nothing else on the menu improved the plan`;
       announce(msg);
@@ -278,10 +294,13 @@ export function OptimizerApp({
     });
   }
 
-  function replan(from: PlanPeriod | null) {
+  function replan(from: string | null) {
     if (!working) return;
     const w = working;
-    const locks = from ? lockedOf(w.meals, (m, i) => periodIndex(m.period) < periodIndex(from) || i.locked) : lockedOf(w.meals);
+    const order = orderMeals(w.meals).map(keyOf);
+    const idx = (m: PlanMeal) => order.indexOf(keyOf(m));
+    const fromMeal = from ? w.meals.find((m) => keyOf(m) === from) : undefined;
+    const locks = fromMeal ? lockedOf(w.meals, (m, i) => idx(m) < idx(fromMeal) || i.locked) : lockedOf(w.meals);
     const request: PlanRequestInput = { ...w.request, locks, freshMeals: [], avoidSignatures: [] };
     void run(from ? `meal:${from}` : "replan", async () => {
       const res = await generatePlanAction(request);
@@ -296,7 +315,7 @@ export function OptimizerApp({
         planId: null,
       };
       setDiff({
-        title: from ? `Re-plan ${MEAL_PERIOD_LABELS[from].toLowerCase()} and later` : "Re-plan around your changes",
+        title: fromMeal ? `Re-plan ${labelOf(fromMeal).toLowerCase()} and later` : "Re-plan around your changes",
         description: from
           ? "Earlier meals and locked items stay as they are; the rest of the day is optimized again. Review the changes before applying them."
           : "Locked items (including ones you added or resized) stay; everything else is optimized again. Review the changes before applying them.",
@@ -391,9 +410,9 @@ export function OptimizerApp({
     () => Object.fromEntries((working?.result.targets ?? []).filter((t) => t.kind === "goal" && t.amount).map((t) => [t.id, t.amount as number])),
     [working?.result.targets],
   );
-  const orderedMeals = useMemo(() => (working ? [...working.meals].sort((a, b) => periodIndex(a.period) - periodIndex(b.period)) : []), [working]);
+  const orderedMeals = useMemo(() => (working ? orderMeals(working.meals) : []), [working]);
   const planned = orderedMeals.filter((m) => m.status === "planned" && m.items.length);
-  const lastPlanned = planned.at(-1)?.period;
+  const lastPlanned = planned.at(-1) ? keyOf(planned.at(-1)!) : undefined;
 
   return (
     <div className="grid grid-cols-1 gap-6">
@@ -411,6 +430,7 @@ export function OptimizerApp({
         minDate={minDate}
         maxDate={maxDate}
         busy={busy === "generate"}
+        diary={diary}
         lockedCount={lockedCount}
         hasPlan={Boolean(working)}
         signedIn={signedIn}
@@ -538,9 +558,9 @@ export function OptimizerApp({
 
             {orderedMeals.map((meal) => (
               <MealCard
-                key={meal.period}
+                key={keyOf(meal)}
                 meal={meal}
-                isLast={meal.period === lastPlanned}
+                isLast={keyOf(meal) === lastPlanned}
                 availability={availability.find((a) => a.period === meal.period)}
                 universityId={university.id}
                 date={working.request.date}
@@ -548,20 +568,20 @@ export function OptimizerApp({
                 showCalories={showCalories && working.result.energy.shown}
                 references={highlightRefs}
                 busy={isBusy}
-                pending={busy === `meal:${meal.period}`}
+                pending={busy === `meal:${keyOf(meal)}`}
                 handlers={{
-                  onServings: (foodId, servings) => edit(mapItem(meal.period, foodId, (i) => ({ ...i, servings, locked: true }))),
-                  onToggleLock: (foodId) => edit(mapItem(meal.period, foodId, (i) => ({ ...i, locked: !i.locked }))),
+                  onServings: (foodId, servings) => edit(mapItem(keyOf(meal), foodId, (i) => ({ ...i, servings, locked: true }))),
+                  onToggleLock: (foodId) => edit(mapItem(keyOf(meal), foodId, (i) => ({ ...i, locked: !i.locked }))),
                   onRemove: (foodId) => {
                     const name = meal.items.find((i) => i.foodId === foodId)?.name ?? "Item";
-                    edit((meals) => meals.map((m) => (m.period === meal.period ? { ...m, items: m.items.filter((i) => i.foodId !== foodId) } : m)), `Removed ${name}`);
+                    edit((meals) => meals.map((m) => (keyOf(m) === keyOf(meal) ? { ...m, items: m.items.filter((i) => i.foodId !== foodId) } : m)), `Removed ${name}`);
                   },
-                  onReplaceAuto: (foodId) => replaceAuto(meal.period as PlanPeriod, foodId),
+                  onReplaceAuto: (foodId) => replaceAuto(keyOf(meal), foodId),
                   onReplaceManual: (foodId, choice: MenuChoice) =>
                     edit(
                       (meals) =>
                         meals.map((m) =>
-                          m.period === meal.period
+                          keyOf(m) === keyOf(meal)
                             ? { ...m, items: m.items.map((i) => (i.foodId === foodId ? itemFromChoice(choice, 1, Math.max(working.request.maxServingsPerItem, 1)) : i)) }
                             : m,
                         ),
@@ -571,7 +591,7 @@ export function OptimizerApp({
                     edit(
                       (meals) =>
                         meals.map((m) =>
-                          m.period === meal.period
+                          keyOf(m) === keyOf(meal)
                             ? {
                                 ...m,
                                 status: "planned",
@@ -584,8 +604,8 @@ export function OptimizerApp({
                         ),
                       `Added ${choice.name}`,
                     ),
-                  onRegenerate: () => regenerateMeal(meal.period as PlanPeriod),
-                  onReplanFromHere: () => replan(meal.period as PlanPeriod),
+                  onRegenerate: () => regenerateMeal(keyOf(meal)),
+                  onReplanFromHere: () => replan(keyOf(meal)),
                 }}
               />
             ))}

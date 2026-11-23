@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, ExternalLink, Info, Loader2, MapPin, Sparkles } from "lucide-react";
+import { ChevronDown, ExternalLink, Info, Loader2, MapPin, NotebookPen, Plus, Sparkles, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
@@ -11,18 +11,36 @@ import { TagInput } from "@/components/settings/tag-input";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { plainName } from "@/lib/format";
+import { fmtKcal, fmtNumber, plainName } from "@/lib/format";
 import { ALLERGEN_LABELS, MAJOR_ALLERGENS } from "@/lib/menus/labels";
 import type { NutrientId } from "@/lib/nutrition/nutrients";
 import { AGE_GROUP_LABELS, type AgeGroup } from "@/lib/nutrition/references";
-import { ITEMS_PER_MEAL_OPTIONS, MAX_ITEMS_NO_LIMIT, STRATEGIES, STRATEGY_KEYS, type StrategyKey } from "@/lib/optimizer/types";
+import { describeMacroTargets } from "@/lib/optimizer/targets";
+import {
+  hasMacroTargets,
+  ITEMS_PER_MEAL_OPTIONS,
+  MAX_ITEMS_NO_LIMIT,
+  MAX_MEALS,
+  MEAL_CALORIES_MAX,
+  MEAL_CALORIES_MIN,
+  mealLabels,
+  resolveMacroTargets,
+  STRATEGIES,
+  STRATEGY_KEYS,
+  type DiaryMode,
+  type MealCalorieMode,
+  type PlanPeriod,
+  type StrategyKey,
+} from "@/lib/optimizer/types";
 import { cn } from "@/lib/utils";
-import { servable, type Inputs, type OptimizerUniversity, type PeriodAvailability } from "./shared";
+import { calorieBudget, newMeal, orderMeals, servable, type CalorieBudget, type DiarySummary, type Inputs, type MealInput, type OptimizerUniversity, type PeriodAvailability } from "./shared";
 
 const FOCUS_OPTIONS: NutrientId[] = [
   "protein",
@@ -51,6 +69,7 @@ export function PlanInputs({
   minDate,
   maxDate,
   busy,
+  diary,
   lockedCount,
   hasPlan,
   signedIn,
@@ -67,6 +86,8 @@ export function PlanInputs({
   minDate: string;
   maxDate: string;
   busy: boolean;
+  /** What's already in the diary for this date (signed-in users). */
+  diary: DiarySummary | null;
   lockedCount: number;
   hasPlan: boolean;
   signedIn: boolean;
@@ -76,8 +97,17 @@ export function PlanInputs({
   const router = useRouter();
   const [moreOpen, setMoreOpen] = useState(false);
   const anyServed = availability.some((a) => servable(a).length > 0);
-  const enabledCount = availability.filter((a) => inputs.meals[a.period].enabled && servable(a).length > 0).length;
+  const availabilityOf = (p: string) => availability.find((a) => a.period === p)!;
+  const enabledCount = inputs.meals.filter((m) => servable(availabilityOf(m.period)).length > 0).length;
   const offered = availability.filter((a) => a.locations.length > 0);
+  // Periods a meal can be planned for: those with markets today, else the usual three.
+  const periodChoices = (offered.length ? offered : availability.filter((a) => ["breakfast", "lunch", "dinner"].includes(a.period))).map((a) => a.period);
+  const ordered = orderMeals(inputs.meals);
+  const labels = mealLabels(ordered);
+  const budget = calorieBudget(inputs, availability, diary);
+  const setMeal = (key: string, patch: Partial<MealInput>) => setInputs((p) => ({ ...p, meals: p.meals.map((m) => (m.key === key ? { ...m, ...patch } : m)) }));
+  const removeMeal = (key: string) => setInputs((p) => ({ ...p, meals: p.meals.filter((m) => m.key !== key) }));
+  const addMeal = (period: PlanPeriod) => setInputs((p) => ({ ...p, meals: [...p.meals, newMeal(p.meals, period)] }));
   const demo = universities.find((u) => u.isDemo && u.id !== university.id);
   const set = <K extends keyof Inputs>(key: K, value: Inputs[K]) => setInputs((p) => ({ ...p, [key]: value }));
   const setDiet = <K extends keyof Inputs["preferences"]>(key: K, value: Inputs["preferences"][K]) =>
@@ -165,31 +195,69 @@ export function PlanInputs({
       <fieldset className="grid gap-3" disabled={!anyServed}>
         <legend className="mb-2 text-sm font-medium">Meals to plan</legend>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {(offered.length ? offered : availability.filter((a) => ["breakfast", "lunch", "dinner"].includes(a.period))).map((a) => (
-            <MealToggle
-              key={a.period}
-              availability={a}
-              value={inputs.meals[a.period]}
-              onChange={(v) => setInputs((p) => ({ ...p, meals: { ...p.meals, [a.period]: v } }))}
+          {ordered.map((m) => (
+            <MealRow
+              key={m.key}
+              meal={m}
+              label={labels[m.key]}
+              availability={availabilityOf(m.period)}
+              periods={periodChoices}
+              periodLabel={(p) => availabilityOf(p).label}
+              calorieMode={budget.dayTarget !== null ? inputs.mealCalories : "flexible"}
+              share={budget.perMeal[m.key] ?? null}
+              canRemove={inputs.meals.length > 1}
+              onChange={(patch) => setMeal(m.key, patch)}
+              onRemove={() => removeMeal(m.key)}
             />
           ))}
         </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline" size="sm" className="justify-self-start rounded-full" disabled={inputs.meals.length >= MAX_MEALS}>
+              <Plus aria-hidden="true" /> Add a meal
+              <ChevronDown className="opacity-60" aria-hidden="true" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-56">
+            {periodChoices.map((p) => (
+              <DropdownMenuItem key={p} onSelect={() => addMeal(p)}>
+                {availabilityOf(p).label}
+                <span className="ml-auto text-xs text-muted-foreground">{servable(availabilityOf(p)).length} markets</span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <p className="text-xs text-muted-foreground">
+          Add as many meals as you eat (up to {MAX_MEALS}), each from the meal period and markets you choose. Two meals can come from the same period, such as an early and a late lunch.
+        </p>
       </fieldset>
 
       <section aria-labelledby="targets-heading" className="grid gap-3 rounded-2xl bg-muted/50 p-4">
         <div>
           <h3 id="targets-heading" className="text-sm font-medium">
-            Daily targets (optional)
+            {signedIn ? "Daily targets" : "Daily targets (optional)"}
           </h3>
           <p className="text-xs text-muted-foreground">
-            Every plan covers as many vitamin, mineral, protein and fiber references as the menus allow. Any target you set here
-            is hit within your tolerance, as close to exact as possible.
+            Every plan covers as many vitamin, mineral, protein and fiber references as the menus allow, and hits your calorie and
+            macro targets for the day within your tolerance, as close to exact as possible.
           </p>
         </div>
-        <TargetsFields value={inputs.targets} onChange={(v) => set("targets", v)} />
+        {signedIn ? (
+          <SettingsTargets targets={inputs.targets} />
+        ) : (
+          <>
+            <TargetsFields value={inputs.targets} onChange={(v) => set("targets", v)} />
+            <p className="text-xs text-muted-foreground">
+              These are your own numbers; the app never sets or suggests a calorie deficit. Sign in to keep them in Settings and plan around your food diary.
+            </p>
+          </>
+        )}
+        {signedIn && diary && <DiaryLine diary={diary} mode={inputs.diary} onChange={(v) => set("diary", v)} />}
+        {budget.dayTarget !== null && (
+          <CalorieSplit budget={budget} mode={inputs.mealCalories} meals={enabledCount} onChange={(v) => set("mealCalories", v)} />
+        )}
         <p className="text-xs text-muted-foreground">
-          These are your own numbers; the app never sets or suggests a calorie deficit. Items without known values for a target
-          aren&apos;t used, and food labels round, so totals can differ slightly from 4/9/4 math.
+          Items without known values for a target aren&apos;t used, and food labels round, so totals can differ slightly from 4/9/4 math.
           {inputs.reference.ageGroup === "under_19" &&
             " Teens are still growing and need enough energy every day; a doctor or registered dietitian can help choose calorie targets."}
         </p>
@@ -483,19 +551,153 @@ function SwitchInline({ id, label, checked, onChange }: { id: string; label: str
   );
 }
 
-function MealToggle({
+/** The daily targets saved in Settings (signed-in users plan with these; they're changed in Settings). */
+function SettingsTargets({ targets }: { targets: Inputs["targets"] }) {
+  const resolved = hasMacroTargets(targets) ? resolveMacroTargets(targets) : null;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-background/70 px-3 py-2.5 text-sm ring-1 ring-border">
+      <span className="min-w-0">
+        {resolved && !resolved.error ? (
+          <>
+            <span className="font-medium">{describeMacroTargets(resolved.targets)}</span>
+            <span className="text-muted-foreground">, each within ±{targets.tolerancePct}%</span>
+          </>
+        ) : (
+          <span className="text-muted-foreground">No calorie or macro targets set. Plans cover vitamins and minerals only.</span>
+        )}
+      </span>
+      <Link href="/settings#goals-heading" className="text-sm font-medium text-primary hover:underline">
+        {resolved ? "Change in Settings" : "Set targets in Settings"}
+      </Link>
+    </div>
+  );
+}
+
+const DIARY_MODE_LABELS: Record<DiaryMode, string> = {
+  all: "Count eaten and planned food",
+  logged: "Count eaten food only",
+  none: "Don't count the diary",
+};
+
+/** What's already in the diary for the plan's date, and whether the plan counts it. */
+function DiaryLine({ diary, mode, onChange }: { diary: DiarySummary; mode: DiaryMode; onChange: (v: DiaryMode) => void }) {
+  const counted = mode === "none" ? null : diary[mode];
+  const all = diary.all;
+  return (
+    <div className="grid gap-2 rounded-xl bg-background/70 px-3 py-2.5 text-sm ring-1 ring-border">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="inline-flex min-w-0 items-center gap-2">
+          <NotebookPen className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          {all.entries ? (
+            <span>
+              Already in your diary for this day: {all.entries} item{all.entries === 1 ? "" : "s"}
+              {all.energy !== null ? `, ≈ ${fmtKcal(all.energy)}` : ""}
+              {all.protein !== null ? `, ${fmtNumber(all.protein)} g protein` : ""}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">Nothing in your diary for this day yet.</span>
+          )}
+        </span>
+        {all.entries > 0 && (
+          <Select value={mode} onValueChange={(v) => onChange(v as DiaryMode)}>
+            <SelectTrigger className="h-8 w-auto rounded-full" aria-label="Which diary food counts toward the day">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(Object.keys(DIARY_MODE_LABELS) as DiaryMode[]).map((k) => (
+                <SelectItem key={k} value={k}>
+                  {DIARY_MODE_LABELS[k]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+      </div>
+      {all.entries > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {counted
+            ? `The plan adds to this: day totals, targets and vitamin and mineral coverage include ${counted.entries} diary item${counted.entries === 1 ? "" : "s"}.`
+            : "The plan ignores your diary for this day."}
+        </p>
+      )}
+    </div>
+  );
+}
+
+const CALORIE_MODE_LABELS: Record<MealCalorieMode, { title: string; hint: string }> = {
+  flexible: { title: "Flexible", hint: "Any split that hits the day" },
+  even: { title: "Split evenly", hint: "The same for every meal" },
+  custom: { title: "Per meal", hint: "Set calories for each meal" },
+};
+
+/** How the calories left for the day are spread over the meals. */
+function CalorieSplit({ budget, mode, meals, onChange }: { budget: CalorieBudget; mode: MealCalorieMode; meals: number; onChange: (v: MealCalorieMode) => void }) {
+  const assigned = Object.values(budget.perMeal).reduce((a, b) => a + b, 0);
+  return (
+    <div className="grid gap-2">
+      <p className="text-sm">
+        <span className="font-medium">Calories left to plan: {budget.left !== null ? fmtKcal(Math.max(0, budget.left)) : "—"}</span>
+        {budget.diaryKcal > 0 && budget.dayTarget !== null && (
+          <span className="text-muted-foreground">
+            {" "}
+            ({fmtKcal(budget.dayTarget)} target − {fmtKcal(budget.diaryKcal)} in your diary)
+          </span>
+        )}
+      </p>
+      <RadioGroup value={mode} onValueChange={(v) => onChange(v as MealCalorieMode)} className="grid gap-2 sm:grid-cols-3" aria-label="How calories are split between meals">
+        {(Object.keys(CALORIE_MODE_LABELS) as MealCalorieMode[]).map((k) => (
+          <Label key={k} htmlFor={`split-${k}`} className="flex cursor-pointer items-start gap-2.5 rounded-xl bg-background/70 p-2.5 font-normal ring-1 ring-border">
+            <RadioGroupItem id={`split-${k}`} value={k} className="mt-0.5" />
+            <span className="grid gap-0.5">
+              <span className="text-sm font-medium">{CALORIE_MODE_LABELS[k].title}</span>
+              <span className="text-xs text-muted-foreground">{CALORIE_MODE_LABELS[k].hint}</span>
+            </span>
+          </Label>
+        ))}
+      </RadioGroup>
+      {mode !== "flexible" && !budget.error && meals > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {mode === "even" ? `About ${fmtKcal((budget.left ?? 0) / meals)} per meal` : `${fmtKcal(assigned)} assigned across ${meals} meal${meals === 1 ? "" : "s"}`}, each within ±
+          {Math.round(budget.tolerance * 100)}%.{mode === "custom" && " Meals left blank share what's left."}
+        </p>
+      )}
+      {budget.error && (
+        <p className="text-xs font-medium text-destructive" role="alert">
+          {budget.error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function MealRow({
+  meal,
+  label,
   availability,
-  value,
+  periods,
+  periodLabel,
+  calorieMode,
+  share,
+  canRemove,
   onChange,
+  onRemove,
 }: {
+  meal: MealInput;
+  label: string;
   availability: PeriodAvailability;
-  value: { enabled: boolean; locationIds: string[] };
-  onChange: (v: { enabled: boolean; locationIds: string[] }) => void;
+  periods: PlanPeriod[];
+  periodLabel: (p: PlanPeriod) => string;
+  calorieMode: MealCalorieMode;
+  /** This meal's calories when split evenly or per meal (blank meals get their share of what's left). */
+  share: number | null;
+  canRemove: boolean;
+  onChange: (patch: Partial<MealInput>) => void;
+  onRemove: () => void;
 }) {
   const open = servable(availability);
   const closedOrMissing = availability.locations.filter((l) => !open.some((o) => o.id === l.id));
   const usable = open.length > 0;
-  const chosen = value.locationIds.filter((id) => open.some((o) => o.id === id));
+  const chosen = meal.locationIds.filter((id) => open.some((o) => o.id === id));
   const where = !chosen.length
     ? open.length === 1
       ? open[0].name
@@ -503,32 +705,43 @@ function MealToggle({
     : chosen.length === 1
       ? open.find((o) => o.id === chosen[0])!.name
       : `${chosen.length} markets`;
-  const id = `meal-${availability.period}`;
+  const id = `meal-${meal.key}`;
+  const [draft, setDraft] = useState(meal.calories === null ? "" : String(meal.calories));
   return (
-    <div className={cn("grid gap-2 rounded-2xl p-3 ring-1 ring-border", value.enabled && usable && "bg-accent/40 ring-primary/40", !usable && "opacity-70")}>
-      <div className="flex items-start gap-3">
-        <Checkbox
-          id={id}
-          checked={value.enabled && usable}
-          disabled={!usable}
-          onCheckedChange={(c) => onChange({ ...value, enabled: c === true })}
-          className="mt-0.5"
-        />
-        <Label htmlFor={id} className="grid gap-0.5 font-normal">
-          <span className="font-medium">{availability.label}</span>
+    <div className={cn("grid gap-2 rounded-2xl p-3 ring-1 ring-border", usable ? "bg-accent/40 ring-primary/40" : "opacity-70")}>
+      <div className="flex items-start gap-2">
+        <div className="grid min-w-0 flex-1 gap-0.5">
+          <span className="font-medium">{label}</span>
           <span className="text-xs text-muted-foreground">
             {usable
               ? `${open.length} market${open.length === 1 ? "" : "s"} with menus`
               : availability.locations.length
-                ? "No menu available"
-                : "Not served this day"}
+                ? "No menu available, so it's skipped"
+                : "Not served this day, so it's skipped"}
           </span>
-        </Label>
+        </div>
+        <Select value={meal.period} onValueChange={(v) => onChange({ period: v as PlanPeriod, locationIds: [] })}>
+          <SelectTrigger className="h-8 w-auto rounded-full" aria-label={`Meal period for ${label}`}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {periods.map((p) => (
+              <SelectItem key={p} value={p}>
+                {periodLabel(p)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {canRemove && (
+          <Button variant="ghost" size="icon-sm" className="rounded-full" onClick={onRemove} aria-label={`Remove ${label}`}>
+            <X aria-hidden="true" />
+          </Button>
+        )}
       </div>
-      {usable && value.enabled && (
+      {usable && (
         <Popover>
           <PopoverTrigger asChild>
-            <Button variant="outline" size="sm" className="h-8 justify-start rounded-full" aria-label={`Where to eat ${availability.label.toLowerCase()}: ${where}`}>
+            <Button variant="outline" size="sm" className="h-8 justify-start rounded-full" aria-label={`Where to eat ${label.toLowerCase()}: ${where}`}>
               <MapPin aria-hidden="true" />
               <span className="truncate">{where}</span>
               <ChevronDown className="ml-auto opacity-60" aria-hidden="true" />
@@ -536,7 +749,7 @@ function MealToggle({
           </PopoverTrigger>
           <PopoverContent align="start" className="w-72 p-3">
             <fieldset className="grid gap-2">
-              <legend className="mb-1 text-sm font-medium">{availability.label}: where</legend>
+              <legend className="mb-1 text-sm font-medium">{label}: where</legend>
               <p className="text-xs text-muted-foreground">Each meal comes from one market. Leave all unchecked to let the optimizer choose.</p>
               {open.map((l) => {
                 const cid = `${id}-${l.id}`;
@@ -546,7 +759,7 @@ function MealToggle({
                     <Checkbox
                       id={cid}
                       checked={on}
-                      onCheckedChange={(c) => onChange({ ...value, locationIds: c === true ? [...chosen, l.id] : chosen.filter((x) => x !== l.id) })}
+                      onCheckedChange={(c) => onChange({ locationIds: c === true ? [...chosen, l.id] : chosen.filter((x) => x !== l.id) })}
                       className="mt-0.5"
                     />
                     <Label htmlFor={cid} className="grid gap-0.5 font-normal">
@@ -564,7 +777,7 @@ function MealToggle({
                 </p>
               )}
               {chosen.length > 0 && (
-                <Button variant="ghost" size="sm" className="justify-self-start" onClick={() => onChange({ ...value, locationIds: [] })}>
+                <Button variant="ghost" size="sm" className="justify-self-start" onClick={() => onChange({ locationIds: [] })}>
                   Any market
                 </Button>
               )}
@@ -572,7 +785,32 @@ function MealToggle({
           </PopoverContent>
         </Popover>
       )}
+      {usable && calorieMode === "even" && share !== null && <p className="text-xs text-muted-foreground">≈ {fmtKcal(share)}</p>}
+      {usable && calorieMode === "custom" && (
+        <div className="flex items-center gap-2">
+          <Label htmlFor={`${id}-kcal`} className="text-xs font-normal text-muted-foreground">
+            Calories
+          </Label>
+          <Input
+            id={`${id}-kcal`}
+            type="number"
+            inputMode="numeric"
+            min={MEAL_CALORIES_MIN}
+            max={MEAL_CALORIES_MAX}
+            step={10}
+            className="h-8 w-28"
+            value={draft}
+            placeholder={share !== null && meal.calories === null ? `auto ≈ ${Math.round(share)}` : "auto"}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              const n = Number(e.target.value);
+              if (e.target.value.trim() === "") onChange({ calories: null });
+              else if (Number.isFinite(n) && n >= MEAL_CALORIES_MIN && n <= MEAL_CALORIES_MAX) onChange({ calories: Math.round(n) });
+            }}
+          />
+          <span className="text-xs text-muted-foreground">kcal</span>
+        </div>
+      )}
     </div>
   );
 }
-

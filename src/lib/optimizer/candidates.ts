@@ -9,10 +9,9 @@ import { formatDate } from "@/lib/dates";
 import { perServingNutrients } from "@/lib/nutrition/food-nutrients";
 import { servingWeight } from "@/lib/nutrition/grams";
 import { normalizeUnit, servingLabel } from "@/lib/nutrition/units";
-import { MEAL_PERIOD_LABELS } from "@/lib/menus/types";
 import { checkFood, isPlantLabeled, isPreferred, summarizeReasons, type FilterVerdict } from "./filters";
 import type { Candidate, MealCandidates } from "./model";
-import type { PlanRequest } from "./types";
+import { mealLabels, type PlanRequest } from "./types";
 
 const HALF_STEP_UNITS = new Set([
   "cup",
@@ -63,7 +62,8 @@ export function bulkPortionReason(servingGrams: number | null, kcal: number | nu
  * marked with the reasons (used by the manual "choose from the menu" picker).
  */
 export async function loadCandidates(db: Db, req: PlanRequest, opts: { keepFiltered?: boolean } = {}): Promise<MealCandidates[]> {
-  const periods = req.meals.map((m) => m.period) as MealPeriod[];
+  const periods = [...new Set(req.meals.map((m) => m.period))] as MealPeriod[];
+  const labels = mealLabels(req.meals);
   const rows = await db
     .select({
       period: menuDays.period,
@@ -96,13 +96,13 @@ export async function loadCandidates(db: Db, req: PlanRequest, opts: { keepFilte
       ),
     );
 
-  const excluded = new Set(req.excluded.map((e) => `${e.period}:${e.foodId}`));
+  const excluded = new Set(req.excluded.map((e) => `${e.meal}:${e.foodId}`));
   // Items the user locked stay available even if they fall outside the filters (they chose them).
-  const locked = new Set(req.locks.map((l) => `${l.period}:${l.foodId}`));
+  const locked = new Set(req.locks.map((l) => `${l.meal}:${l.foodId}`));
   const dateText = formatDate(req.date, "medium");
 
   return req.meals.map((meal) => {
-    const label = MEAL_PERIOD_LABELS[meal.period];
+    const label = labels[meal.key];
     const selected = new Set(meal.locationIds);
     const forMeal = rows.filter((r) => r.period === meal.period && (!selected.size || selected.has(r.locationId)));
     const serving = forMeal.filter((r) => r.status === "available" && r.foodId);
@@ -114,7 +114,7 @@ export async function loadCandidates(db: Db, req: PlanRequest, opts: { keepFilte
       const key = `${r.locationId}|${r.foodId}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      if (excluded.has(`${meal.period}:${r.foodId}`)) continue;
+      if (excluded.has(`${meal.key}:${r.foodId}`)) continue;
       const food = {
         name: r.name,
         ingredients: r.ingredients ?? null,
@@ -122,7 +122,7 @@ export async function loadCandidates(db: Db, req: PlanRequest, opts: { keepFilte
         dietaryLabels: r.dietaryLabels ?? [],
       };
       const verdict = checkFood(food, req.preferences);
-      const isLocked = locked.has(`${meal.period}:${r.foodId}`);
+      const isLocked = locked.has(`${meal.key}:${r.foodId}`);
       const weight = servingWeight(r.estimate?.servingGrams, r.servingGrams);
       const servingGrams = weight?.grams ?? null;
       const nutrients = perServingNutrients({ estimate: r.estimate ?? null, official: r.official ?? {} });
@@ -142,6 +142,7 @@ export async function loadCandidates(db: Db, req: PlanRequest, opts: { keepFilte
         name: r.name,
         station: r.station ?? null,
         period: meal.period,
+        mealKey: meal.key,
         locationId: r.locationId,
         locationName: r.locationName,
         servingLabel: servingLabel(r.servingAmount, r.servingUnit),
@@ -173,6 +174,8 @@ export async function loadCandidates(db: Db, req: PlanRequest, opts: { keepFilte
       }
     }
     return {
+      key: meal.key,
+      label,
       period: meal.period,
       candidates,
       unavailableNote,

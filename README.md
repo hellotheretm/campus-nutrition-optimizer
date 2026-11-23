@@ -36,7 +36,7 @@ built to support more campuses.
 | Area | Routes | Highlights |
 |---|---|---|
 | Menus | `/menus`, `/foods/[id]` | Browse by date, dining market and meal. Every value shows where it came from (official, USDA matched, USDA recipe-derived, approximate, unknown), a confidence level and a range. Menus are labeled current, cached or unavailable. Each food shows bars for its 1–3 highest nutrients. |
-| Meal optimizer | `/optimizer` | A mixed-integer program picks dishes and servings across the meals you choose. Lock, replace, add and remove items, re-plan one meal or the rest of the day with a before/after preview, compare strategies, save or add to the diary. Works without an account. Anyone can set daily calorie, protein, fat and carb targets that the plan hits within a chosen tolerance. |
+| Meal optimizer | `/optimizer` | A mixed-integer program picks dishes and servings across the meals you choose. Lock, replace, add and remove items, re-plan one meal or the rest of the day with a before/after preview, compare strategies, save or add to the diary. Works without an account. Daily calorie, protein, fat and carb targets (from Settings when signed in) are hit within a chosen tolerance, counting food already in the diary; calories can be split per meal, and extra meals (a second lunch, say) can be added. |
 | Food diary | `/diary`, `/history` | Log menu items, USDA foods or custom foods. Edit servings, copy days, favorites, saved meals, planned vs eaten entries. Entries keep a snapshot of their nutrition. |
 | Dashboard | `/dashboard` | Today and the past week, with confidence labels and non-judgmental wording. |
 | Accounts | `/login`, `/signup`, `/settings` | Email and password (with verification and reset), optional Google sign-in, profile and preferences, data export, account deletion. |
@@ -137,7 +137,10 @@ The optimizer (`src/lib/optimizer/`) picks dishes and servings from the stored m
 - **Daily targets** (optional, for anyone). Set any of calories, protein, fat and carbs. They always agree with
   `calories = 4 × protein + 9 × fat + 4 × carbs`: with three set, the fourth is calculated, and four set must add up
   exactly. Each total must land within a ±3/5/10% tolerance while being pulled toward exact. If the menus can't reach
-  a target, the result says how close it can get. Signed-in users can save default targets in Settings.
+  a target, the result says how close it can get. Signed-in users set them in Settings and every plan follows them.
+- **Diary-aware, any number of meals.** Food already in the diary for the date counts toward the targets, so plans fill
+  what is left. Calories left can be split evenly across meals or set per meal. Add up to 8 meals, each with its own
+  period (a second lunch, say) and dining halls.
 - **Editing.** Lock, exclude or replace items; ask for another option (a cut excludes every plan already shown);
   re-plan from a chosen meal onward with a before/after diff; compare strategies against the same baseline. Totals update
   instantly in the browser, and saving or adding to the diary sends only the selection — the server rebuilds the plan

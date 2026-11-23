@@ -6,8 +6,14 @@ mixed-integer linear program (MILP) solved with HiGHS (WebAssembly) on the serve
 
 ## Inputs
 
-- Date, the meals to plan (breakfast, brunch, lunch, dinner, late night), and for each meal either specific dining
-  locations or all of them. Only locations with a stored menu for that meal are offered.
+- Date and the meals to plan, up to 8. Each meal has a period (breakfast, brunch, lunch, dinner, late night) and either
+  specific dining locations or all of them; only locations with a stored menu for that period are offered. A period can
+  be used more than once ("Add a meal" → Lunch makes "Lunch 2", which can come from different dining halls). Each meal
+  has a key (`lunch`, `lunch-2`) that locks, exclusions and re-planning refer to.
+- **Food already in the diary** for the date (signed-in only): all entries, logged only, or none. It is a fixed starting
+  amount: goals, limits, upper levels and calorie/macro targets count it, so the plan fills only what is left.
+- **Calories per meal**: flexible (only the day total matters), split the calories left evenly across the meals, or a
+  custom amount per meal (meals left blank share the rest). "Left" means the day's calorie target minus diary food.
 - Dietary pattern (vegetarian, vegan, pescatarian), allergens to avoid, "avoid gluten/dairy/nuts", excluded ingredients,
   dislikes and preferred foods.
 - Reference values: FDA Daily Values (default) or Dietary Reference Intakes by optional age range and sex.
@@ -16,7 +22,8 @@ mixed-integer linear program (MILP) solved with HiGHS (WebAssembly) on the serve
 - Strategy: balanced, protein-forward, plant-forward, lower sodium, or fewer items.
 - Optional **daily targets** for calories, protein, fat and carbs, available to everyone. Any may be left blank; with
   three of the four set the fourth is calculated (calories = 4P + 9F + 4C), and four set must add up exactly. A
-  tolerance of ±3, 5 or 10% applies to each. Signed-in users can save default targets in Settings.
+  tolerance of ±3, 5 or 10% applies to each. For signed-in users the targets are the ones in Settings, applied on the
+  server (change them there any time); guests type them on the optimizer page.
 - Locks, exclusions and "don't repeat" constraints coming from the editing tools.
 
 ## Candidates
@@ -60,6 +67,13 @@ Per meal: between 1 and the maximum number of items, and a cap on total servings
   allow has 2,610 kcal, outside your 2,300 ±5% target"). Items with an unknown value for a targeted macro can't be
   counted, so they are not chosen unless locked. Targets replace the AMDR penalties. Label rounding
   means a food's calories rarely equal its 4/9/4 math exactly, which is why a tolerance exists at all.
+- **Diary food** (when counted): its totals are constants in every row above. Goal coverage uses its conservative
+  value, limits its pessimistic value, ULs its high end, and macro targets its value, so for example the protein target
+  row becomes `Σ value·n + under − over = target − diary protein`. Diary food over a UL or already past the calorie
+  target is reported as the reason a plan can't fit.
+- **Calories per meal** (even or custom split): each meal gets its own energy row like the daily one
+  (`Σ kcal·n + under − over = meal target`, same tolerance, same 40/t pull and 5000/t band slack), and the
+  diagnosis names the meal that can't reach its share. Splits that don't add up are rejected before solving.
 - **Practical portions:** a small cost per item and per serving, a larger one for second servings of the same dish,
   a bonus for preferred foods, a small cost for low-confidence items, and a variety cost when the same dish appears in
   several meals. Strategies adjust weights (for example plant-forward rewards labeled vegetarian/vegan items; lower
