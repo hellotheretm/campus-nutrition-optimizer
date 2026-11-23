@@ -35,6 +35,9 @@ export const STRATEGIES = {
 export type StrategyKey = keyof typeof STRATEGIES;
 export const STRATEGY_KEYS = Object.keys(STRATEGIES) as StrategyKey[];
 
+/** "No limit" on items per meal: above the largest menu the solver ever considers for one meal. */
+export const MAX_ITEMS_NO_LIMIT = 50;
+
 export const PLAN_PERIODS = ["breakfast", "brunch", "lunch", "dinner", "late_night"] as const;
 export type PlanPeriod = (typeof PLAN_PERIODS)[number];
 
@@ -206,7 +209,7 @@ export const planRequestSchema = z.object({
     dislikes: [],
     preferred: [],
   }),
-  maxItemsPerMeal: z.number().int().min(1).max(8).default(4),
+  maxItemsPerMeal: z.number().int().min(1).max(MAX_ITEMS_NO_LIMIT).default(4),
   maxServingsPerItem: z.number().min(1).max(3).default(2),
   locks: z
     .array(z.object({ period: periodEnum, foodId: z.string().min(1).max(100), servings: z.number().min(0.5).max(6) }))
@@ -217,10 +220,13 @@ export const planRequestSchema = z.object({
   avoidSignatures: z.array(z.string().max(4000)).max(10).default([]),
   /** Meals whose current items must not be repeated exactly (used by "regenerate this meal"). */
   freshMeals: z
-    .array(z.object({ period: periodEnum, foodIds: z.array(z.string().max(100)).max(12) }))
+    .array(z.object({ period: periodEnum, foodIds: z.array(z.string().max(100)).max(MAX_ITEMS_NO_LIMIT) }))
     .max(5)
     .default([]),
 });
+
+/** Items-per-meal choices offered in the app; MAX_ITEMS_NO_LIMIT means no limit. */
+export const ITEMS_PER_MEAL_OPTIONS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 15] as const;
 
 export type PlanRequest = z.infer<typeof planRequestSchema>;
 export type PlanRequestInput = z.input<typeof planRequestSchema>;
@@ -235,6 +241,8 @@ export interface PlanItem {
   maxServings: number;
   servingLabel: string;
   servingGrams: number | null;
+  /** True when the serving weight was published, false when estimated (shown with "≈"). */
+  gramsExact: boolean;
   /** Per-serving nutrient estimates, so the browser can recompute totals while editing. */
   nutrients: Partial<NutrientEstimates>;
   confidence: Confidence;
@@ -265,6 +273,8 @@ export interface MenuChoice {
   step: number;
   servingLabel: string;
   servingGrams: number | null;
+  /** True when the serving weight was published, false when estimated (shown with "≈"). */
+  gramsExact: boolean;
   nutrients: Partial<NutrientEstimates>;
   confidence: Confidence;
   allergens: string[];

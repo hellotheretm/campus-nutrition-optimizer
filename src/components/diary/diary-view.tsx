@@ -37,6 +37,7 @@ import { Switch } from "@/components/ui/switch";
 import { addDays, formatDate } from "@/lib/dates";
 import { fmtGrams, fmtKcal, servingsText } from "@/lib/format";
 import type { NutrientEstimates } from "@/lib/nutrition/estimator";
+import { weightText } from "@/lib/nutrition/grams";
 import { coverageOf, KEY_NUTRIENTS, LIMIT_KEYS, totalsOf } from "@/lib/nutrition/daily";
 import type { ReferenceProfile } from "@/lib/nutrition/references";
 
@@ -353,7 +354,14 @@ function EntryRow({ entry, date, showCalories }: { entry: DiaryEntryView; date: 
           )}
         </div>
         <p className="text-xs text-muted-foreground">
-          {servingsText(servings)} × {entry.servingLabel ?? "serving"} · {entry.locationName ?? SOURCE_LABEL[entry.source]}
+          {[
+            `${servingsText(servings)} × ${entry.servingLabel ?? "serving"}`,
+            // Entries keep the weight but not whether it was published, so only USDA entries (weighed by the user) show it as exact.
+            weightText(entry.servingLabel ?? "", entry.grams, entry.source === "usda", servings),
+            entry.locationName ?? SOURCE_LABEL[entry.source],
+          ]
+            .filter(Boolean)
+            .join(" · ")}
         </p>
         <p className="text-xs text-muted-foreground tabular-nums">
           {showCalories && <>{energy === null ? "kcal unknown" : `${official ? "" : "≈ "}${fmtKcal(energy)}`} · </>}P {fmtGrams(val("protein"))} · C{" "}

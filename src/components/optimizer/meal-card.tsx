@@ -8,6 +8,7 @@ import { Panel } from "@/components/app/page-header";
 import { Stepper } from "@/components/common/stepper";
 import { ConfidenceBadge } from "@/components/nutrition/badges";
 import { NutrientBars } from "@/components/nutrition/nutrient-bars";
+import { labelWithGrams, weightText } from "@/lib/nutrition/grams";
 import { highlightsFor } from "@/lib/nutrition/highlights";
 import type { NutrientId } from "@/lib/nutrition/nutrients";
 import { AllergenChips, DietaryChips } from "@/components/nutrition/label-chips";
@@ -226,6 +227,7 @@ function ItemRow({
           {[
             item.station,
             `${servingsText(item.servings)} × ${item.servingLabel}`,
+            weightText(item.servingLabel, item.servingGrams, item.gramsExact, item.servings),
             showCalories && energy !== null ? `${official ? "" : "≈ "}${fmtKcal(energy * item.servings)}` : null,
             protein !== null ? `${fmtNumber(protein * item.servings, protein * item.servings < 10 ? 1 : 0)} g protein` : null,
           ]
@@ -411,7 +413,7 @@ function ChoiceList({ items, showCalories, onPick }: { items: MenuChoice[]; show
               <span className="text-xs text-muted-foreground">
                 {[
                   c.station,
-                  c.servingLabel,
+                  labelWithGrams(c.servingLabel, c.servingGrams, c.gramsExact),
                   showCalories && kcal !== null ? fmtKcal(kcal) : null,
                   protein !== null ? `${fmtNumber(protein, protein < 10 ? 1 : 0)} g protein` : null,
                   `vitamins & minerals: ${CONFIDENCE_LABELS[c.confidence].toLowerCase()}`,

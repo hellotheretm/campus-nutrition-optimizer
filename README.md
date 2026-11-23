@@ -129,7 +129,7 @@ The optimizer (`src/lib/optimizer/`) picks dishes and servings from the stored m
 - **Objective.** Minimize weighted shortfall against reference values (FDA Daily Values or Dietary Reference Intakes),
   with diminishing returns so one nutrient never crowds out the others; soft limits for sodium, saturated fat and added
   sugars; hard-to-exceed tolerable upper intake levels; and small practicality costs (few items, sensible servings,
-  variety, preferred foods).
+  variety, preferred foods, and no two versions of the same food in one meal).
 - **Uncertainty.** Goals use the conservative end of each estimate's range and limits use the pessimistic end, so
   uncertain data never inflates how well a plan does.
 - **One goal.** Every plan maximizes coverage of the day's vitamin, mineral, protein and fiber references; there are
@@ -327,6 +327,8 @@ the `CRON_SECRET` bearer token.
 
 - Never invent menus, availability, ingredients, serving sizes or nutrition. **Unknown is shown as unknown, never as
   zero.**
+- Serving weights in grams appear only when the menu source published them (shown as is) or the estimator derived
+  them from a stated volume, USDA portion, calories or recipe (shown with ≈); otherwise no weight is shown.
 - No allergen guarantees: labels and ingredient estimates can be wrong, and kitchens share equipment.
 - No diagnosing deficiencies, no scores or streaks, no mandatory weight, and no automatic calorie deficits: calorie
   and macro targets are only ever numbers the person sets.

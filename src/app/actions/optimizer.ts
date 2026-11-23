@@ -108,6 +108,7 @@ export async function menuChoicesAction(input: unknown): Promise<ActionResult<Me
       step: c.step,
       servingLabel: c.servingLabel,
       servingGrams: c.servingGrams,
+      gramsExact: c.gramsExact,
       nutrients: c.nutrients,
       confidence: c.confidence,
       allergens: c.allergens,

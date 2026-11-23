@@ -25,6 +25,7 @@ import { isIsoDate, todayIn, weekdayOf } from "@/lib/dates";
 import type { Confidence, EstimationResult, NutrientEstimates } from "@/lib/nutrition/estimator";
 import { perServingNutrients } from "@/lib/nutrition/food-nutrients";
 import { highlightsFor, type NutrientHighlight } from "@/lib/nutrition/highlights";
+import { labelWithGrams, servingWeight } from "@/lib/nutrition/grams";
 import { servingLabel } from "@/lib/nutrition/units";
 import { menuFreshness, type FreshnessInfo } from "@/lib/menus/freshness";
 import { ensureDemoMenusFor } from "@/lib/menus/sync";
@@ -228,12 +229,19 @@ export interface MenuView {
   locations: MenuLocationView[];
 }
 
+/** The serving label with its weight in grams when the source published it or it was estimated. */
+function withWeight(label: string, estimate: EstimationResult | null, published: number | null): string {
+  const w = servingWeight(estimate?.servingGrams, published);
+  return w ? labelWithGrams(label, w.grams, w.exact) : label;
+}
+
 function cardFor(row: {
   id: string;
   name: string;
   station: string | null;
   servingAmount: number | null;
   servingUnit: string | null;
+  servingGrams: number | null;
   official: Record<string, number>;
   estimate: EstimationResult | null;
   allergens: string[];
@@ -244,7 +252,7 @@ function cardFor(row: {
     id: row.id,
     name: row.name,
     station: row.station,
-    servingLabel: servingLabel(row.servingAmount, row.servingUnit),
+    servingLabel: withWeight(servingLabel(row.servingAmount, row.servingUnit), row.estimate, row.servingGrams),
     energy: n.energy?.value ?? null,
     protein: n.protein?.value ?? null,
     carbohydrate: n.carbohydrate?.value ?? null,
@@ -284,6 +292,7 @@ export async function getMenuView(universityIdOrSlug: string, requestedDate?: st
           name: foods.name,
           servingAmount: foods.servingAmount,
           servingUnit: foods.servingUnit,
+          servingGrams: foods.servingGrams,
           official: foods.official,
           estimate: foods.estimate,
           allergens: foods.allergens,
@@ -423,7 +432,7 @@ export async function searchMenuFoods(universityId: string, query: string, limit
     out.push({
       id: f.id,
       name: f.name,
-      servingLabel: servingLabel(f.servingAmount, f.servingUnit),
+      servingLabel: withWeight(servingLabel(f.servingAmount, f.servingUnit), f.estimate, f.servingGrams),
       energy: n.energy?.value ?? null,
       lastSeen: f.lastSeen,
       confidence: f.estimate?.overallConfidence ?? "none",

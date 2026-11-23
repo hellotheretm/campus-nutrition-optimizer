@@ -84,6 +84,7 @@ export async function evaluatePlan(req: PlanRequest, selection: PlanSelection, s
         maxServings: Math.max(req.maxServingsPerItem, servings),
         servingLabel: c.servingLabel,
         servingGrams: c.servingGrams,
+      gramsExact: c.gramsExact,
         nutrients: c.nutrients,
         confidence: c.confidence,
         allergens: c.allergens,

@@ -18,6 +18,7 @@
  * + calorie and macro target deviations (when set: a hard ±tolerance band plus a pull toward
  *   exact), or, without targets, small penalties for macro energy outside the AMDR
  * + 0.3 per repeated dish across meals (variety)
+ * + 5 per extra item of the same kind in one meal (two milks, two pastas; see similar.ts)
  * + small per-item and per-serving costs, plus 0.2 per serving beyond the first of any
  *   item (practical portions), and preferred-food bonuses.
  *
@@ -31,6 +32,7 @@ import type { Confidence, NutrientEstimates } from "@/lib/nutrition/estimator";
 import { NUTRIENTS, type NutrientId } from "@/lib/nutrition/nutrients";
 import { LpModel, solveModel } from "@/lib/solver/lp";
 import { computeCoverage, conservativeValue, energyTotal, explainItems, pessimisticValue, planLines, upperValue } from "./coverage";
+import { similarGroups } from "./similar";
 import { nutrientName, type MacroSpec, type Targets } from "./targets";
 import {
   MACRO_IDS,
@@ -54,6 +56,7 @@ export interface Candidate {
   locationName: string;
   servingLabel: string;
   servingGrams: number | null;
+  gramsExact: boolean;
   step: number;
   nutrients: Partial<NutrientEstimates>;
   confidence: Confidence;
@@ -76,6 +79,8 @@ export interface MealCandidates {
 
 const MAX_CANDIDATES_PER_MEAL = 45;
 const UL_PENALTY = 10_000;
+/** Cost of each extra item of the same kind in one meal (chocolate and skim milk, pasta and whole grain pasta). */
+const SIMILAR_ITEM_PENALTY = 5;
 /** Cost of missing a calorie or macro target by 100% inside its band (1% ≈ 0.4): pulls plans toward exact. */
 const MACRO_EXACT_WEIGHT = 40;
 /** Cost per unit (relative to target) outside the band; only paid when no plan can stay inside it. */
@@ -258,6 +263,13 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
     model.addConstraint(`items_${mi}`, mealRefs.map((r) => [r.y, 1] as const), "<=", itemCap);
     model.addConstraint(`atleast_${mi}`, mealRefs.map((r) => [r.y, 1] as const), ">=", 1);
     model.addConstraint(`servings_${mi}`, mealRefs.map((r) => [r.n, r.c.step] as const), "<=", servingCap);
+
+    // Discourage two versions of the same food in one meal: every similar item beyond the first costs extra.
+    for (const [gi, group] of similarGroups(mealRefs.map((r) => r.c.name)).entries()) {
+      const extra = model.addVar(`sim_${mi}_${gi}`, { lb: 0 });
+      model.addObjective(extra, SIMILAR_ITEM_PENALTY);
+      model.addConstraint(`simc_${mi}_${gi}`, [...group.map((k) => [mealRefs[k].y, 1] as [string, number]), [extra, -1]], "<=", 1);
+    }
   }
 
   const mealUnavailable = meals.map((m, i) => !mealHasVars[i]);
@@ -453,6 +465,7 @@ export async function optimize(req: PlanRequest, meals: MealCandidates[], target
       maxServings: r.maxSteps * r.c.step,
       servingLabel: r.c.servingLabel,
       servingGrams: r.c.servingGrams,
+      gramsExact: r.c.gramsExact,
       nutrients: r.c.nutrients,
       confidence: r.c.confidence,
       allergens: r.c.allergens,
@@ -667,6 +680,7 @@ export function modelNotes(strategy: PlanRequest["strategy"]): string[] {
     "Coverage below each reference is penalized more steeply as the gap grows; nothing extra is gained beyond 100%.",
     "Estimates are counted conservatively: medium-confidence values 15% and low-confidence values 35% of the way toward their low end (toward the high end for limits).",
     "A second serving of the same dish carries a small penalty, so plans favor variety and realistic portions.",
+    "Two versions of the same food in one meal (two milks, pasta and whole grain pasta) are avoided unless nothing else fits; similarity is guessed from item names.",
     "Upper intake levels use the high end of each estimate and are never exceeded unless no plan can avoid it.",
     "Unknown values are never treated as zero in totals; in planning they simply aren't counted toward goals.",
   ];

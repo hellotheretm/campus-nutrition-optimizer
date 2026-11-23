@@ -64,6 +64,12 @@ Per meal: between 1 and the maximum number of items, and a cap on total servings
   a bonus for preferred foods, a small cost for low-confidence items, and a variety cost when the same dish appears in
   several meals. Strategies adjust weights (for example plant-forward rewards labeled vegetarian/vegan items; lower
   sodium tightens the sodium limit to 75% and triples its weight).
+- **Similar foods:** items whose names share a main food ("Skim Milk" and "Chocolate Milk", "Pasta" and "Whole Grain
+  Penne") form a group per meal. Every chosen item in a group beyond the first costs 5 (about as much as leaving several
+  nutrients 20% short), so plans avoid them unless nothing else fits the targets. The grouping (`similar.ts`) is a name
+  heuristic: it takes the main noun (or a leading staple, as in "Pasta Primavera"), folds plurals and a few synonyms
+  (penne → pasta, toast → bread, tots → potato), and only ever adds a soft penalty, so a wrong guess never blocks a plan.
+- **Items per meal:** 2–15, or no limit (the cap is then the candidate list itself, at most 45 items per meal).
 
 ### Editing constraints
 

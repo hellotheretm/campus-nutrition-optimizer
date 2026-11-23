@@ -7,6 +7,7 @@ import type { Db } from "@/db/client";
 import { diningLocations, foods, menuDays, menuItems, type MealPeriod } from "@/db/schema";
 import { formatDate } from "@/lib/dates";
 import { perServingNutrients } from "@/lib/nutrition/food-nutrients";
+import { servingWeight } from "@/lib/nutrition/grams";
 import { normalizeUnit, servingLabel } from "@/lib/nutrition/units";
 import { MEAL_PERIOD_LABELS } from "@/lib/menus/types";
 import { checkFood, isPlantLabeled, isPreferred, summarizeReasons, type FilterVerdict } from "./filters";
@@ -122,7 +123,8 @@ export async function loadCandidates(db: Db, req: PlanRequest, opts: { keepFilte
       };
       const verdict = checkFood(food, req.preferences);
       const isLocked = locked.has(`${meal.period}:${r.foodId}`);
-      const servingGrams = r.estimate?.servingGrams?.value ?? r.servingGrams ?? null;
+      const weight = servingWeight(r.estimate?.servingGrams, r.servingGrams);
+      const servingGrams = weight?.grams ?? null;
       const nutrients = perServingNutrients({ estimate: r.estimate ?? null, official: r.official ?? {} });
       const bulk = bulkPortionReason(servingGrams, nutrients.energy?.value ?? null, r.servingUnit ?? null);
       if (bulk && !isLocked) {
@@ -144,6 +146,7 @@ export async function loadCandidates(db: Db, req: PlanRequest, opts: { keepFilte
         locationName: r.locationName,
         servingLabel: servingLabel(r.servingAmount, r.servingUnit),
         servingGrams,
+        gramsExact: weight?.exact ?? false,
         step: servingStep(r.servingUnit ?? null),
         nutrients,
         confidence: r.estimate?.overallConfidence ?? "none",

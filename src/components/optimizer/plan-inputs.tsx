@@ -20,7 +20,7 @@ import { plainName } from "@/lib/format";
 import { ALLERGEN_LABELS, MAJOR_ALLERGENS } from "@/lib/menus/labels";
 import type { NutrientId } from "@/lib/nutrition/nutrients";
 import { AGE_GROUP_LABELS, type AgeGroup } from "@/lib/nutrition/references";
-import { STRATEGIES, STRATEGY_KEYS, type StrategyKey } from "@/lib/optimizer/types";
+import { ITEMS_PER_MEAL_OPTIONS, MAX_ITEMS_NO_LIMIT, STRATEGIES, STRATEGY_KEYS, type StrategyKey } from "@/lib/optimizer/types";
 import { cn } from "@/lib/utils";
 import { servable, type Inputs, type OptimizerUniversity, type PeriodAvailability } from "./shared";
 
@@ -97,7 +97,7 @@ export function PlanInputs({
       : "FDA Daily Values",
     filterCount ? `${filterCount} food filter${filterCount === 1 ? "" : "s"}` : "no food filters",
     prefs.preferred.length ? `${prefs.preferred.length} favorite${prefs.preferred.length === 1 ? "" : "s"}` : null,
-    `up to ${inputs.maxItemsPerMeal} items per meal`,
+    inputs.maxItemsPerMeal >= MAX_ITEMS_NO_LIMIT ? "no item limit per meal" : `up to ${inputs.maxItemsPerMeal} items per meal`,
     inputs.focus.length ? `extra weight on ${inputs.focus.length}` : null,
   ]
     .filter(Boolean)
@@ -387,11 +387,12 @@ export function PlanInputs({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {[2, 3, 4, 5, 6].map((n) => (
+                    {ITEMS_PER_MEAL_OPTIONS.map((n) => (
                       <SelectItem key={n} value={String(n)}>
                         {n} items
                       </SelectItem>
                     ))}
+                    <SelectItem value={String(MAX_ITEMS_NO_LIMIT)}>No limit</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

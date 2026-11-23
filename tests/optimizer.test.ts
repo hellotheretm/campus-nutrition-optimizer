@@ -62,6 +62,7 @@ function cand(foodId: string, period: MealPeriod, locationId: string, n: Partial
     locationName: locationId,
     servingLabel: "1 serving",
     servingGrams: 150,
+    gramsExact: true,
     step: 1,
     nutrients,
     confidence: "high",

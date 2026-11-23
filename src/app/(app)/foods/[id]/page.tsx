@@ -17,6 +17,7 @@ import { formatDate, todayIn } from "@/lib/dates";
 import { fmtNutrient, fmtPercent } from "@/lib/format";
 import { MEAL_PERIOD_LABELS } from "@/lib/menus/types";
 import type { NutrientEstimates } from "@/lib/nutrition/estimator";
+import { labelWithGrams, servingWeight } from "@/lib/nutrition/grams";
 import { METHOD_DESCRIPTIONS, METHOD_LABELS } from "@/lib/nutrition/provenance";
 import type { NutrientId } from "@/lib/nutrition/nutrients";
 import { getReferenceProfile, type ReferenceProfile } from "@/lib/nutrition/references";
@@ -152,9 +153,8 @@ async function FoodContent({ params }: { params: Params }) {
   const today = todayIn(university?.timezone ?? "America/Chicago");
   const est = food.estimate;
   const grams = est?.servingGrams;
-  const servingText = `${food.servingAmount ?? 1} ${food.servingUnit ?? "serving"}${
-    grams?.value ? ` (${grams.basis === "stated" ? "" : "≈ "}${Math.round(grams.value)} g)` : ""
-  }`;
+  const weight = servingWeight(grams, food.servingGrams);
+  const servingText = labelWithGrams(`${food.servingAmount ?? 1} ${food.servingUnit ?? "serving"}`, weight?.grams, weight?.exact ?? false);
   const latest = appearances[0];
   const next = upcoming[0];
   const isLatestRevision = revisions[0]?.id === food.id;
@@ -201,7 +201,7 @@ async function FoodContent({ params }: { params: Params }) {
           </div>
           <div className="flex shrink-0 flex-wrap gap-2">
             <LogFoodButton
-              food={{ id: food.id, name: food.name, servingLabel: `${food.servingAmount ?? 1} ${food.servingUnit ?? "serving"}` }}
+              food={{ id: food.id, name: food.name, servingLabel: servingText }}
               date={today}
               today={today}
               period={latest?.date === today ? latest.period : next?.period}

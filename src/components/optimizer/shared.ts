@@ -7,7 +7,7 @@ import type { NutrientId } from "@/lib/nutrition/nutrients";
 import type { AgeGroup, ReferenceSex, ReferenceStandard } from "@/lib/nutrition/references";
 import { computeCoverage, energyTotal, planLines, ulWarnings } from "@/lib/optimizer/coverage";
 import type { CoverageRow, DietFilterInput, MacroTargetsInput, MenuChoice, PlanItem, PlanMeal, PlanPeriod, PlanRequest, PlanResult, StrategyKey } from "@/lib/optimizer/types";
-import { dietaryPreferencesSchema, PLAN_PERIODS, STRATEGY_KEYS } from "@/lib/optimizer/types";
+import { dietaryPreferencesSchema, MAX_ITEMS_NO_LIMIT, PLAN_PERIODS, STRATEGY_KEYS } from "@/lib/optimizer/types";
 import { z } from "zod";
 
 export interface PeriodAvailability {
@@ -134,6 +134,7 @@ export function itemFromChoice(c: MenuChoice, servings: number, maxServings: num
     maxServings,
     servingLabel: c.servingLabel,
     servingGrams: c.servingGrams,
+      gramsExact: c.gramsExact,
     nutrients: c.nutrients,
     confidence: c.confidence,
     allergens: c.allergens,
@@ -163,7 +164,7 @@ const storedSchema = z
       tolerancePct: z.union([z.literal(3), z.literal(5), z.literal(10)]),
     }),
     preferences: dietaryPreferencesSchema,
-    maxItemsPerMeal: z.number().int().min(1).max(8),
+    maxItemsPerMeal: z.number().int().min(1).max(MAX_ITEMS_NO_LIMIT),
     maxServingsPerItem: z.number().min(1).max(3),
     focus: z.array(z.string().max(40)).max(8),
   })
